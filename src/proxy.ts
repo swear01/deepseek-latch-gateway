@@ -18,7 +18,11 @@ function isRateLimitOrQuotaError(status: number, bodyText: string): boolean {
     lower.includes("rate_limit_exceeded") ||
     lower.includes("quota exceeded") ||
     lower.includes("too many requests") ||
-    lower.includes("usage limit reached")
+    lower.includes("usage limit reached") ||
+    lower.includes("gousagelimiterror") ||
+    lower.includes("usagelimiterror") ||
+    lower.includes("weekly usage limit") ||
+    lower.includes("regionerror")
   ) {
     return true;
   }
@@ -61,9 +65,13 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
     const endpoint = latch.getEndpointByIndex(currentIndex);
     latch.recordRequest(currentIndex);
 
-    // Build target upstream URL
-    const targetBase = endpoint.baseUrl.replace(/\/+$/, "");
-    const targetUrl = `${targetBase}${pathWithQuery}`;
+    // Build target upstream URL (prevent double /v1/v1)
+    let cleanBase = endpoint.baseUrl.replace(/\/+$/, "");
+    let cleanPath = pathWithQuery;
+    if (cleanBase.endsWith("/v1") && cleanPath.startsWith("/v1")) {
+      cleanPath = cleanPath.slice(3);
+    }
+    const targetUrl = `${cleanBase}${cleanPath}`;
 
     // Prepare forward headers
     const headers = new Headers();
