@@ -2,7 +2,8 @@ import { readFileSync, existsSync } from "node:fs";
 import { parse as parseYaml } from "yaml";
 import type { GatewayConfig, EndpointConfig } from "./types";
 
-function interpolateEnv(str: string): string {
+function interpolateEnv(str?: string): string {
+  if (!str) return "";
   return str.replace(/\$\{([^}]+)\}/g, (_, key) => {
     const val = process.env[key];
     if (val === undefined) {
@@ -13,12 +14,48 @@ function interpolateEnv(str: string): string {
   });
 }
 
-function resolveEndpoint(endpoint: EndpointConfig): EndpointConfig {
+interface RawEndpointConfig {
+  id?: string;
+  name?: string;
+  baseUrl?: string;
+  base_url?: string;
+  apiKey?: string;
+  api_key?: string;
+  weight?: number;
+  models?: string[];
+}
+
+interface RawGatewayConfig {
+  server?: {
+    host?: string;
+    port?: number;
+    timeoutSeconds?: number;
+    timeout_seconds?: number;
+  };
+  strategy?: {
+    mode?: "latch";
+    debounceSeconds?: number;
+    debounce_seconds?: number;
+    maxRetriesPerRequest?: number;
+    max_retries_per_request?: number;
+  };
+  endpoints?: RawEndpointConfig[];
+  models?: {
+    aliases?: Record<string, string>;
+  };
+}
+
+function resolveEndpoint(raw: RawEndpointConfig, index: number): EndpointConfig {
+  const id = raw.id || `endpoint-${index + 1}`;
+  const rawBaseUrl = raw.baseUrl || raw.base_url || "https://opencode.ai/zen/go/v1";
+  const rawApiKey = raw.apiKey || raw.api_key || "";
   return {
-    ...endpoint,
-    baseUrl: interpolateEnv(endpoint.baseUrl),
-    apiKey: interpolateEnv(endpoint.apiKey),
-    name: endpoint.name ? interpolateEnv(endpoint.name) : endpoint.id,
+    id,
+    name: raw.name ? interpolateEnv(raw.name) : id,
+    baseUrl: interpolateEnv(rawBaseUrl),
+    apiKey: interpolateEnv(rawApiKey),
+    weight: raw.weight,
+    models: raw.models,
   };
 }
 
@@ -74,26 +111,30 @@ export function loadConfig(configPath?: string): GatewayConfig {
     };
   }
 
-  const parsed = parseYaml(rawContent) as Partial<GatewayConfig>;
+  const parsed = (parseYaml(rawContent) || {}) as RawGatewayConfig;
+
+  const endpoints = (parsed.endpoints || []).map(resolveEndpoint);
+  if (endpoints.length === 0) {
+    throw new Error("Invalid configuration: 'endpoints' array must contain at least one endpoint.");
+  }
 
   const config: GatewayConfig = {
     server: {
       host: parsed.server?.host || "127.0.0.1",
       port: parsed.server?.port || 8080,
-      timeoutSeconds: parsed.server?.timeoutSeconds || 120,
+      timeoutSeconds: parsed.server?.timeoutSeconds || parsed.server?.timeout_seconds || 120,
     },
     strategy: {
       mode: parsed.strategy?.mode || "latch",
-      debounceSeconds: parsed.strategy?.debounceSeconds ?? 1.0,
-      maxRetriesPerRequest: parsed.strategy?.maxRetriesPerRequest || (parsed.endpoints?.length ?? 2),
+      debounceSeconds: parsed.strategy?.debounceSeconds ?? parsed.strategy?.debounce_seconds ?? 1.0,
+      maxRetriesPerRequest:
+        parsed.strategy?.maxRetriesPerRequest ||
+        parsed.strategy?.max_retries_per_request ||
+        endpoints.length,
     },
-    endpoints: (parsed.endpoints || []).map(resolveEndpoint),
+    endpoints,
     models: parsed.models || { aliases: {} },
   };
-
-  if (config.endpoints.length === 0) {
-    throw new Error("Invalid configuration: 'endpoints' array must contain at least one endpoint.");
-  }
 
   return config;
 }
