@@ -17,5 +17,5 @@
 
 ## Phase 3: Oracle & Fleet Rollout
 - [ ] Deploy to Oracle Cloud (`deepseek-gateway.service`) with memory cgroups.
-- [ ] Update `swear-review` configuration (`llm.url: http://127.0.0.1:8080/v1/chat/completions`).
+- [ ] Update `swear-review` configuration (`llm.url: http://127.0.0.1:35001/v1/chat/completions`).
 - [ ] Deploy to remaining Linux nodes in the HAPI fleet (`mazu`, `athena`, `valkyrie`, `cthulhu`, `zeus`).

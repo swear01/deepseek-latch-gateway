@@ -53,7 +53,7 @@ bun dev
 {
   "providers": {
     "opencode-go": {
-      "baseUrl": "http://127.0.0.1:8080/v1",
+      "baseUrl": "http://127.0.0.1:35001/v1",
       "apiKey": "local-gateway",
       "api": "openai-completions"
     }
@@ -66,7 +66,7 @@ bun dev
 from openai import OpenAI
 
 client = OpenAI(
-    base_url="http://127.0.0.1:8080/v1",
+    base_url="http://127.0.0.1:35001/v1",
     api_key="local-gateway"
 )
 
@@ -82,7 +82,7 @@ for chunk in response:
 ### 3. Swear Review (`config.yaml`)
 ```yaml
 llm:
-  url: "http://127.0.0.1:8080/v1/chat/completions"
+  url: "http://127.0.0.1:35001/v1/chat/completions"
   model: "deepseek-v4-flash"
 ```
 

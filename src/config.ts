@@ -99,7 +99,7 @@ export function loadConfig(configPath?: string): GatewayConfig {
     return {
       server: {
         host: process.env.HOST || "127.0.0.1",
-        port: parseInt(process.env.PORT || "8080", 10),
+        port: parseInt(process.env.PORT || "35001", 10),
         timeoutSeconds: 120,
       },
       strategy: {
@@ -121,7 +121,7 @@ export function loadConfig(configPath?: string): GatewayConfig {
   const config: GatewayConfig = {
     server: {
       host: parsed.server?.host || "127.0.0.1",
-      port: parsed.server?.port || 8080,
+      port: parsed.server?.port || 35001,
       timeoutSeconds: parsed.server?.timeoutSeconds || parsed.server?.timeout_seconds || 120,
     },
     strategy: {
