@@ -13,12 +13,12 @@ endpoints:
   - id: "opencode-go-1"
     name: "OpenCode Go (Account 1)"
     base_url: "https://opencode.ai/zen/go/v1"
-    api_key: "${OPENCODE_API_KEY_1:-${OPENCODE_GO_KEY_1}}"
+    api_key: "${OPENCODE_API_KEY_1}"
 
   - id: "opencode-go-2"
     name: "OpenCode Go (Account 2)"
     base_url: "https://opencode.ai/zen/go/v1"
-    api_key: "${OPENCODE_API_KEY_2:-${OPENCODE_GO_KEY_2}}"
+    api_key: "${OPENCODE_API_KEY_2}"
 
   # --- Future Multi-Endpoint Expansion Examples ---
   # - id: "deepseek-official"
