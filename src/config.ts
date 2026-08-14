@@ -4,8 +4,25 @@ import type { GatewayConfig, EndpointConfig } from "./types";
 
 function interpolateEnv(str: string): string {
   return str.replace(/\$\{([^}]+)\}/g, (_, key) => {
+    // Support syntax ${VAR1:-${VAR2}} or ${VAR1:-default}
+    if (key.includes(":-")) {
+      const parts = key.split(":-");
+      for (const p of parts) {
+        const cleanKey = p.replace(/^\$\{/, "").replace(/\}$/, "");
+        const val = process.env[cleanKey];
+        if (val !== undefined && val !== "") {
+          return val;
+        }
+      }
+      return "";
+    }
     const val = process.env[key];
     if (val === undefined) {
+      // Check alias
+      if (key === "OPENCODE_GO_KEY_1") return process.env.OPENCODE_API_KEY_1 || process.env.OPENCODE_API_KEY || "";
+      if (key === "OPENCODE_GO_KEY_2") return process.env.OPENCODE_API_KEY_2 || "";
+      if (key === "OPENCODE_API_KEY_1") return process.env.OPENCODE_GO_KEY_1 || process.env.OPENCODE_API_KEY || "";
+      if (key === "OPENCODE_API_KEY_2") return process.env.OPENCODE_GO_KEY_2 || "";
       console.warn(`[Config] Warning: Environment variable '${key}' is not defined.`);
       return "";
     }
@@ -32,8 +49,15 @@ export function loadConfig(configPath?: string): GatewayConfig {
   } else {
     // If no config file found, fallback to env-based default
     console.log(`[Config] No config file found at ${targetPath}, checking environment variables...`);
-    const key1 = process.env.OPENCODE_GO_KEY_1 || process.env.OPENCODE_API_KEY || "";
-    const key2 = process.env.OPENCODE_GO_KEY_2 || "";
+    const key1 =
+      process.env.OPENCODE_API_KEY_1 ||
+      process.env.OPENCODE_GO_KEY_1 ||
+      process.env.OPENCODE_API_KEY ||
+      "";
+    const key2 =
+      process.env.OPENCODE_API_KEY_2 ||
+      process.env.OPENCODE_GO_KEY_2 ||
+      "";
 
     const endpoints: EndpointConfig[] = [];
     if (key1) {
@@ -54,7 +78,9 @@ export function loadConfig(configPath?: string): GatewayConfig {
     }
 
     if (endpoints.length === 0) {
-      throw new Error("No endpoints configured. Provide a config.yaml or OPENCODE_GO_KEY_1 environment variable.");
+      throw new Error(
+        "No endpoints configured. Provide a config.yaml or OPENCODE_API_KEY_1 / OPENCODE_GO_KEY_1 environment variable."
+      );
     }
 
     return {
