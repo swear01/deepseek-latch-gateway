@@ -131,6 +131,17 @@ llm:
 
 ## 🖥️ Fleet Deployment & Service Management
 
+### Fleet endpoint matrix（每台機器接到的 endpoint）
+
+所有 client（pi models.json / opencode.jsonc / swear-review）一律指向**本機**的 gateway，無跨機連線：
+
+| 機器 | Gateway port | 備註 |
+|---|---|---|
+| Mac | `127.0.0.1:35001` | opencode.jsonc 為 symlink → `transfer_MAC/stow` |
+| mazu / athena / cthulhu / valkyrie | `127.0.0.1:35001` | NFS 共享 home，寫一次全同步 |
+| oracle | `127.0.0.1:35001` | 另有 swear-review → `localhost:35001` |
+| zeus（`su_zeus`/swear02） | `127.0.0.1:35002` | 同機還有 swear01 帳號，loopback port 整機共享，35001 會 EADDRINUSE；zeus 的 opencode 走直接 OAuth，不經 gateway |
+
 > **zeus special case**: the zeus machine (`140.112.171.138`, lab server) hosts
 > both `swear02` (zeus) and `swear01` accounts. Loopback ports are shared
 > machine-wide, so the `swear01` gateway (NFS-shared config) and the `swear02`
