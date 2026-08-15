@@ -44,6 +44,7 @@ interface RawGatewayConfig {
   endpoints?: RawEndpointConfig[];
   models?: {
     aliases?: Record<string, string>;
+    allow?: string[];
   };
 }
 

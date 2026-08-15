@@ -25,6 +25,8 @@ export interface GatewayConfig {
   endpoints: EndpointConfig[];
   models?: {
     aliases?: Record<string, string>;
+    /** If set, requests whose model is not in this list are rejected (400). */
+    allow?: string[];
   };
 }
 

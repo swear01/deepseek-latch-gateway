@@ -134,6 +134,31 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
     rawBodyText = await req.text();
   }
 
+  const originalModel = parseRequestBody(rawBodyText)?.model;
+
+  // --- Model allowlist ---------------------------------------------------------
+  // Checked against the original (pre-alias) model: unknown models are rejected
+  // outright instead of being aliased or forwarded.
+  if (originalModel && config.models?.allow && config.models.allow.length > 0) {
+    if (!config.models.allow.includes(originalModel)) {
+      const allowed = config.models.allow.join(", ");
+      console.warn(`[Model Rejected] ${originalModel} (allowed: ${allowed})`);
+      return new Response(
+        JSON.stringify({
+          error: {
+            message: `Model not allowed: ${originalModel}. Allowed models: ${allowed}`,
+            type: "invalid_request_error",
+            code: "model_not_allowed",
+          },
+        }),
+        {
+          status: 400,
+          headers: { "Content-Type": "application/json" },
+        }
+      );
+    }
+  }
+
   const finalBodyText = rewriteRequestBody(rawBodyText, config);
   const requestModel = parseRequestBody(finalBodyText)?.model;
 

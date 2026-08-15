@@ -36,9 +36,8 @@ endpoints:
   #   base_url: "https://api.deepseek.com/v1"
   #   api_key: "${DEEPSEEK_API_KEY}"
 
-# Model Aliases Mapping (optional)
+# Model Allowlist (required policy: only these two models exist)
 models:
-  aliases:
-    "deepseek-chat": "deepseek-v4-flash"
-    "deepseek-coder": "deepseek-v4-flash"
-    "deepseek-reasoner": "deepseek-v4-pro"
+  allow:
+    - "deepseek-v4-flash"
+    - "deepseek-v4-pro"

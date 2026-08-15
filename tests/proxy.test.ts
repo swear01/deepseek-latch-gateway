@@ -244,4 +244,67 @@ describe("Proxy & Failover Integration", () => {
     expect(flashRes.headers.get("X-Gateway-Active-Endpoint")).toBe("ep-2"); // latch pool (ep-1 429 -> ep-2)
     expect(server3Hits).toBe(hitsBefore.s3 + 1); // dedicated untouched
   });
+
+  it("rejects models outside the allowlist", async () => {
+    const config: GatewayConfig = {
+      server: { host: "127.0.0.1", port: 8080, timeoutSeconds: 10 },
+      strategy: { mode: "latch", debounceSeconds: 0.01, maxRetriesPerRequest: 2 },
+      endpoints: [
+        {
+          id: "ep-1",
+          name: "Mock Upstream 1",
+          baseUrl: "http://127.0.0.1:19001/v1",
+          apiKey: "sk-key-1",
+        },
+        {
+          id: "ep-2",
+          name: "Mock Upstream 2",
+          baseUrl: "http://127.0.0.1:19002/v1",
+          apiKey: "sk-key-2",
+        },
+      ],
+      models: {
+        aliases: {},
+        allow: ["deepseek-v4-flash", "deepseek-v4-pro"],
+      },
+    };
+
+    const latch = new RSLatchManager(config);
+    const hitsBefore = { s1: server1Hits, s2: server2Hits };
+
+    // deepseek-chat must be refused outright (legacy alias disabled)
+    const chatReq = new Request("http://127.0.0.1:8080/v1/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "deepseek-chat", messages: [] }),
+    });
+    const chatRes = await handleProxyRequest({
+      req: chatReq,
+      url: new URL(chatReq.url),
+      latch,
+      config,
+    });
+
+    expect(chatRes.status).toBe(400);
+    const body = await chatRes.json();
+    expect(body.error.code).toBe("model_not_allowed");
+    expect(body.error.message).toContain("deepseek-chat");
+    expect(server1Hits).toBe(hitsBefore.s1); // no upstream was touched
+    expect(server2Hits).toBe(hitsBefore.s2);
+
+    // Allowed model still flows
+    const okReq = new Request("http://127.0.0.1:8080/v1/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "deepseek-v4-flash", messages: [] }),
+    });
+    const okRes = await handleProxyRequest({
+      req: okReq,
+      url: new URL(okReq.url),
+      latch,
+      config,
+    });
+    expect(okRes.status).toBe(200);
+    expect(server2Hits).toBe(hitsBefore.s2 + 1);
+  });
 });
