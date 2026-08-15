@@ -31,10 +31,10 @@ Copy `config.example.yaml` to `config.yaml`:
 cp config.example.yaml config.yaml
 ```
 
-Set your keys in your shell or `.env`:
+Set your keys in your shell or `~/.secrets`:
 ```bash
-export OPENCODE_GO_KEY_1="sk-opencode-go-account-1"
-export OPENCODE_GO_KEY_2="sk-opencode-go-account-2"
+export OPENCODE_API_KEY_1="sk-opencode-account-1"
+export OPENCODE_API_KEY_2="sk-opencode-account-2"
 ```
 
 ### 3. Run Gateway
@@ -54,14 +54,20 @@ bun dev
   "providers": {
     "opencode-go": {
       "baseUrl": "http://127.0.0.1:35001/v1",
-      "apiKey": "local-gateway",
-      "api": "openai-completions"
+      "apiKey": "local-gateway"
     }
   }
 }
 ```
 
-### 2. Python (DeepSeek Harness / OpenAI SDK)
+### 2. DeepSeek Harness (`~/.dsh/settings.yaml` or `cordis.patch.yml`)
+```yaml
+llm-deepseek:
+  baseURL: http://127.0.0.1:35001/v1
+  apiKeyEnv: OPENCODE_API_KEY_1
+```
+
+### 3. Python (OpenAI SDK)
 ```python
 from openai import OpenAI
 
@@ -79,7 +85,7 @@ for chunk in response:
     print(chunk.choices[0].delta.content or "", end="")
 ```
 
-### 3. Swear Review (`config.yaml`)
+### 4. Swear Review (Oracle `/opt/swear-review/data/config.yaml`)
 ```yaml
 llm:
   url: "http://127.0.0.1:35001/v1/chat/completions"
@@ -90,9 +96,33 @@ llm:
 
 ## 🛠️ Management & Monitoring Endpoints
 
-* **Healthcheck**: `GET /healthz`
-* **Realtime Metrics & Active Key**: `GET /status`
-* **Manual Latch Toggle**: `POST /switch` or `POST /switch?index=1`
+* **Healthcheck**: `GET http://127.0.0.1:35001/healthz`
+* **Realtime Metrics & Active Key**: `GET http://127.0.0.1:35001/status`
+* **Manual Latch Toggle**: `POST http://127.0.0.1:35001/switch` or `POST http://127.0.0.1:35001/switch?index=1`
+
+---
+
+## 🖥️ Fleet Deployment & Service Management
+
+### macOS (LaunchAgent)
+- **Plist**: `~/Library/LaunchAgents/com.swear.deepseek-gateway.plist`
+- **Config**: `~/.config/deepseek-gateway/config.yaml`
+- **Commands**:
+  ```bash
+  launchctl load ~/Library/LaunchAgents/com.swear.deepseek-gateway.plist   # 啟動
+  launchctl unload ~/Library/LaunchAgents/com.swear.deepseek-gateway.plist # 停止
+  tail -f ~/.local/log/deepseek-gateway.log
+  ```
+
+### Linux / Oracle Cloud (Systemd User Unit)
+- **Service**: `~/.config/systemd/user/deepseek-gateway.service`
+- **Config**: `~/.config/deepseek-gateway/config.yaml`
+- **Commands**:
+  ```bash
+  systemctl --user status deepseek-gateway
+  systemctl --user restart deepseek-gateway
+  tail -f ~/.local/log/deepseek-gateway.log
+  ```
 
 ---
 
