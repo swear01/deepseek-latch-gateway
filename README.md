@@ -131,6 +131,13 @@ llm:
 
 ## 🖥️ Fleet Deployment & Service Management
 
+> **zeus special case**: the zeus machine (`140.112.171.138`, lab server) hosts
+> both `swear02` (zeus) and `swear01` accounts. Loopback ports are shared
+> machine-wide, so the `swear01` gateway (NFS-shared config) and the `swear02`
+> gateway cannot both bind `35001` (`EADDRINUSE`, observed 2026-08-16).
+> `su_zeus` therefore runs on port **35002** (`~/.config/deepseek-gateway/config.yaml`,
+> `~/.pi/agent/models.json` adjusted accordingly). All other machines use `35001`.
+
 ### macOS (LaunchAgent)
 - **Plist**: `~/Library/LaunchAgents/com.swear.deepseek-gateway.plist`
 - **Config**: `~/.config/deepseek-gateway/config.yaml`
