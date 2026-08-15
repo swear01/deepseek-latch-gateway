@@ -3,7 +3,11 @@ export interface EndpointConfig {
   name: string;
   baseUrl: string;
   apiKey: string;
+  /** Incoming model ids routed exclusively to this endpoint (bypasses the RS-Latch pool) */
   models?: string[];
+  /** Per-endpoint rewrite of the outgoing model name: incoming -> upstream */
+  modelMap?: Record<string, string>;
+  weight?: number;
   extraHeaders?: Record<string, string>;
 }
 

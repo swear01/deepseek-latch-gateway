@@ -20,6 +20,32 @@ Unlike stateless generic proxies (which alternate every request or rely on fixed
 
 ---
 
+## 🧭 Model-Based Dedicated Routing
+
+An endpoint declaring a `models` list becomes a **dedicated route**: incoming requests whose `model` matches are forwarded directly to that endpoint, **bypassing the RS-Latch pool entirely**. All other models flow through the latch pool as usual.
+
+Optional `model_map` rewrites the outgoing model name per endpoint (e.g. Command Code uses a `deepseek/`-namespaced catalog):
+
+```yaml
+endpoints:
+  - id: "command-code"
+    name: "Command Code (V4 Pro)"
+    base_url: "https://api.commandcode.ai/provider/v1"
+    api_key: "${COMMAMD_CODE_API_KEY}"
+    models: ["deepseek-v4-pro"]              # incoming model -> dedicated route
+    model_map:
+      "deepseek-v4-pro": "deepseek/deepseek-v4-pro"   # outgoing rename
+
+  - id: "opencode-go-1"
+    name: "OpenCode Go (Account 1)"
+    base_url: "https://opencode.ai/zen/go/v1"
+    api_key: "${OPENCODE_API_KEY_1}"        # no models -> latch pool member
+```
+
+Dedicated endpoint traffic is still visible in `/status` (requests / success / 429 counters).
+
+---
+
 ## 🚀 Quick Start
 
 ### 1. Prerequisites
@@ -35,6 +61,7 @@ Set your keys in your shell or `~/.secrets`:
 ```bash
 export OPENCODE_API_KEY_1="sk-opencode-account-1"
 export OPENCODE_API_KEY_2="sk-opencode-account-2"
+export COMMAMD_CODE_API_KEY="sk-command-code"   # optional: V4 Pro dedicated route
 ```
 
 ### 3. Run Gateway

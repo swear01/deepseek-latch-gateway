@@ -23,6 +23,8 @@ interface RawEndpointConfig {
   api_key?: string;
   weight?: number;
   models?: string[];
+  modelMap?: Record<string, string>;
+  model_map?: Record<string, string>;
 }
 
 interface RawGatewayConfig {
@@ -56,6 +58,7 @@ function resolveEndpoint(raw: RawEndpointConfig, index: number): EndpointConfig 
     apiKey: interpolateEnv(rawApiKey),
     weight: raw.weight,
     models: raw.models,
+    modelMap: raw.modelMap || raw.model_map,
   };
 }
 

@@ -9,7 +9,17 @@ strategy:
   max_retries_per_request: 2     # Max retry attempts per in-flight request
 
 # RS-Latch cycling pool (Key 1 -> Key 2 -> Key 1)
+# Endpoints declaring `models` are dedicated routes: incoming requests whose
+# model matches are forwarded there directly (bypassing the RS-Latch pool).
 endpoints:
+  - id: "command-code"
+    name: "Command Code (V4 Pro)"
+    base_url: "https://api.commandcode.ai/provider/v1"
+    api_key: "${COMMAMD_CODE_API_KEY}"
+    models: ["deepseek-v4-pro"]
+    model_map:
+      "deepseek-v4-pro": "deepseek/deepseek-v4-pro"
+
   - id: "opencode-go-1"
     name: "OpenCode Go (Account 1)"
     base_url: "https://opencode.ai/zen/go/v1"

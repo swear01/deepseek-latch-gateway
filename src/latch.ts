@@ -2,6 +2,8 @@ import type { GatewayConfig, EndpointConfig, EndpointStats, GatewayStatus } from
 
 export class RSLatchManager {
   private config: GatewayConfig;
+  /** Cycling pool: endpoints WITHOUT a dedicated `models` list */
+  private pool: EndpointConfig[];
   private activeIndex: number = 0;
   private lastSwitchTimestamp: number = 0;
   private lastIndexSwitchTimestamps: Map<number, number> = new Map();
@@ -13,6 +15,10 @@ export class RSLatchManager {
 
   constructor(config: GatewayConfig) {
     this.config = config;
+    this.pool = config.endpoints.filter((ep) => !ep.models || ep.models.length === 0);
+    if (this.pool.length === 0) {
+      throw new Error("Invalid configuration: RS-Latch pool needs at least one endpoint without a dedicated `models` list.");
+    }
     for (const ep of config.endpoints) {
       this.stats.set(ep.id, {
         id: ep.id,
@@ -24,17 +30,21 @@ export class RSLatchManager {
     }
   }
 
+  public getPoolSize(): number {
+    return this.pool.length;
+  }
+
   public getActiveIndex(): number {
     return this.activeIndex;
   }
 
   public getActiveEndpoint(): EndpointConfig {
-    return this.config.endpoints[this.activeIndex];
+    return this.pool[this.activeIndex];
   }
 
   public getEndpointByIndex(index: number): EndpointConfig {
-    const idx = ((index % this.config.endpoints.length) + this.config.endpoints.length) % this.config.endpoints.length;
-    return this.config.endpoints[idx];
+    const idx = ((index % this.pool.length) + this.pool.length) % this.pool.length;
+    return this.pool[idx];
   }
 
   public recordRequest(endpointIndex: number): void {
@@ -55,8 +65,34 @@ export class RSLatchManager {
     }
   }
 
+  /** Stats-only recording for dedicated (non-pool) endpoints. */
+  public recordRequestFor(endpointId: string): void {
+    this.totalRequests++;
+    const stat = this.stats.get(endpointId);
+    if (stat) {
+      stat.requests++;
+    }
+  }
+
+  public recordSuccessFor(endpointId: string): void {
+    const stat = this.stats.get(endpointId);
+    if (stat) {
+      stat.successCount++;
+      stat.lastSuccessTime = new Date().toISOString();
+    }
+  }
+
+  public record429For(endpointId: string, reason: string = "HTTP 429 Rate Limit"): void {
+    const stat = this.stats.get(endpointId);
+    if (stat) {
+      stat.errors429++;
+      stat.last429Time = new Date().toISOString();
+    }
+    console.warn(`[Dedicated 429] ${endpointId}: ${reason}`);
+  }
+
   /**
-   * Called when an endpoint returns 429 / Quota Exceeded.
+   * Called when a pool endpoint returns 429 / Quota Exceeded.
    * Flips the RS Latch to the next available endpoint.
    * Debounced per-index to prevent concurrent requests on the same index from multi-flipping.
    */
@@ -86,12 +122,12 @@ export class RSLatchManager {
 
     // Advance Latch to next index (RS Latch Ping-Pong flip)
     const oldIndex = this.activeIndex;
-    const newIndex = (oldIndex + 1) % this.config.endpoints.length;
+    const newIndex = (oldIndex + 1) % this.pool.length;
     this.activeIndex = newIndex;
     this.lastSwitchTimestamp = now;
     this.lastIndexSwitchTimestamps.set(oldIndex, now);
     this.totalSwitches++;
-    this.lastSwitchReason = `Switched from ${this.config.endpoints[oldIndex].name} to ${this.config.endpoints[newIndex].name} due to: ${reason}`;
+    this.lastSwitchReason = `Switched from ${this.pool[oldIndex].name} to ${this.pool[newIndex].name} due to: ${reason}`;
 
     console.log(
       `\x1b[33m[RS-Latch FLIP]\x1b[0m ${this.lastSwitchReason} (Total switches: ${this.totalSwitches})`
@@ -101,20 +137,19 @@ export class RSLatchManager {
   }
 
   /**
-   * Force switch the latch to a specific index or to the next index.
+   * Force switch the latch to a specific pool index or to the next pool index.
    */
   public forceSwitch(targetIndex?: number): { oldIndex: number; newIndex: number } {
     const oldIndex = this.activeIndex;
     if (targetIndex !== undefined) {
       this.activeIndex =
-        ((targetIndex % this.config.endpoints.length) + this.config.endpoints.length) %
-        this.config.endpoints.length;
+        ((targetIndex % this.pool.length) + this.pool.length) % this.pool.length;
     } else {
-      this.activeIndex = (this.activeIndex + 1) % this.config.endpoints.length;
+      this.activeIndex = (this.activeIndex + 1) % this.pool.length;
     }
     this.lastSwitchTimestamp = Date.now();
     this.totalSwitches++;
-    this.lastSwitchReason = `Manual switch to index ${this.activeIndex} (${this.config.endpoints[this.activeIndex].name})`;
+    this.lastSwitchReason = `Manual switch to index ${this.activeIndex} (${this.pool[this.activeIndex].name})`;
 
     console.log(`\x1b[36m[RS-Latch MANUAL]\x1b[0m ${this.lastSwitchReason}`);
     return { oldIndex, newIndex: this.activeIndex };

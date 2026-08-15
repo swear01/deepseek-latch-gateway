@@ -1,4 +1,4 @@
-import type { GatewayConfig } from "./types";
+import type { GatewayConfig, EndpointConfig } from "./types";
 import type { RSLatchManager } from "./latch";
 
 interface ProxyRequestContext {
@@ -29,21 +29,98 @@ function isRateLimitOrQuotaError(status: number, bodyText: string): boolean {
   return false;
 }
 
+function parseRequestBody(bodyText: string): { json: Record<string, unknown>; model?: string } | null {
+  if (!bodyText) return null;
+  try {
+    const json = JSON.parse(bodyText);
+    if (json && typeof json === "object" && typeof json.model === "string") {
+      return { json, model: json.model };
+    }
+    return { json };
+  } catch {
+    return null;
+  }
+}
+
 function rewriteRequestBody(bodyText: string, config: GatewayConfig): string {
   if (!config.models?.aliases || Object.keys(config.models.aliases).length === 0) {
     return bodyText;
   }
-  try {
-    const json = JSON.parse(bodyText);
-    if (json.model && config.models.aliases[json.model]) {
-      const originalModel = json.model;
-      json.model = config.models.aliases[originalModel];
-      return JSON.stringify(json);
-    }
-  } catch {
-    // Non-JSON body, leave as is
+  const parsed = parseRequestBody(bodyText);
+  if (!parsed) return bodyText;
+  const alias = config.models.aliases[parsed.model || ""];
+  if (alias && alias !== parsed.model) {
+    parsed.json.model = alias;
+    return JSON.stringify(parsed.json);
   }
   return bodyText;
+}
+
+async function forwardToEndpoint(
+  endpoint: EndpointConfig,
+  req: Request,
+  targetUrl: string,
+  method: string,
+  bodyText: string,
+  modelMap?: Record<string, string>
+): Promise<Response> {
+  let finalBodyText = bodyText;
+  if (modelMap && Object.keys(modelMap).length > 0) {
+    const parsed = parseRequestBody(bodyText);
+    if (parsed && parsed.model && modelMap[parsed.model]) {
+      parsed.json.model = modelMap[parsed.model];
+      finalBodyText = JSON.stringify(parsed.json);
+    }
+  }
+
+  const headers = new Headers();
+  req.headers.forEach((val, key) => {
+    const lowerKey = key.toLowerCase();
+    // Drop hop-by-hop headers and host
+    if (lowerKey !== "host" && lowerKey !== "authorization" && lowerKey !== "content-length") {
+      headers.set(key, val);
+    }
+  });
+
+  headers.set("Authorization", `Bearer ${endpoint.apiKey}`);
+  if (endpoint.extraHeaders) {
+    for (const [k, v] of Object.entries(endpoint.extraHeaders)) {
+      headers.set(k, v);
+    }
+  }
+
+  return fetch(targetUrl, {
+    method,
+    headers,
+    body: method !== "GET" && method !== "HEAD" ? finalBodyText : undefined,
+    signal: req.signal,
+  });
+}
+
+function buildTargetUrl(baseUrl: string, pathWithQuery: string): string {
+  let cleanBase = baseUrl.replace(/\/+$/, "");
+  let cleanPath = pathWithQuery;
+  if (cleanBase.endsWith("/v1") && cleanPath.startsWith("/v1")) {
+    cleanPath = cleanPath.slice(3);
+  }
+  return `${cleanBase}${cleanPath}`;
+}
+
+function forwardUpstreamResponse(upstreamRes: Response, endpointId: string, attempt: number): Response {
+  const responseHeaders = new Headers();
+  upstreamRes.headers.forEach((val, key) => {
+    const lowerKey = key.toLowerCase();
+    if (lowerKey !== "content-encoding" && lowerKey !== "content-length" && lowerKey !== "transfer-encoding") {
+      responseHeaders.set(key, val);
+    }
+  });
+  responseHeaders.set("X-Gateway-Active-Endpoint", endpointId);
+  responseHeaders.set("X-Gateway-Attempt", String(attempt));
+  return new Response(upstreamRes.body, {
+    status: upstreamRes.status,
+    statusText: upstreamRes.statusText,
+    headers: responseHeaders,
+  });
 }
 
 export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Response> {
@@ -58,47 +135,63 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
   }
 
   const finalBodyText = rewriteRequestBody(rawBodyText, config);
-  const maxRetries = Math.min(config.strategy.maxRetriesPerRequest, config.endpoints.length);
+  const requestModel = parseRequestBody(finalBodyText)?.model;
+
+  // --- Model-based dedicated routing -------------------------------------------
+  // An endpoint declaring `models` handles those incoming models exclusively
+  // (bypasses the RS-Latch pool). Others fall through to the latch pool below.
+  if (requestModel) {
+    const dedicated = config.endpoints.find((ep) => ep.models?.includes(requestModel));
+    if (dedicated) {
+      const targetUrl = buildTargetUrl(dedicated.baseUrl, pathWithQuery);
+      latch.recordRequestFor(dedicated.id);
+      try {
+        const upstreamRes = await forwardToEndpoint(
+          dedicated,
+          req,
+          targetUrl,
+          method,
+          finalBodyText,
+          dedicated.modelMap
+        );
+        if (upstreamRes.ok) {
+          latch.recordSuccessFor(dedicated.id);
+        } else if (isRateLimitOrQuotaError(upstreamRes.status, await upstreamRes.clone().text())) {
+          latch.record429For(dedicated.id, `Status ${upstreamRes.status}`);
+        }
+        return forwardUpstreamResponse(upstreamRes, dedicated.id, 1);
+      } catch (err: unknown) {
+        const errorMsg = (err as Error)?.message || String(err);
+        console.error(`\x1b[31m[Fetch Error]\x1b[0m Failed to reach ${dedicated.name} (${targetUrl}): ${errorMsg}`);
+        return new Response(
+          JSON.stringify({
+            error: {
+              message: `Gateway failed to connect to dedicated upstream: ${errorMsg}`,
+              type: "gateway_error",
+              code: "upstream_unreachable",
+            },
+          }),
+          {
+            status: 502,
+            headers: { "Content-Type": "application/json" },
+          }
+        );
+      }
+    }
+  }
+
+  // --- RS-Latch failover pool --------------------------------------------------
+  const maxRetries = Math.min(config.strategy.maxRetriesPerRequest, latch.getPoolSize());
 
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     const currentIndex = latch.getActiveIndex();
     const endpoint = latch.getEndpointByIndex(currentIndex);
     latch.recordRequest(currentIndex);
 
-    // Build target upstream URL (prevent double /v1/v1)
-    let cleanBase = endpoint.baseUrl.replace(/\/+$/, "");
-    let cleanPath = pathWithQuery;
-    if (cleanBase.endsWith("/v1") && cleanPath.startsWith("/v1")) {
-      cleanPath = cleanPath.slice(3);
-    }
-    const targetUrl = `${cleanBase}${cleanPath}`;
-
-    // Prepare forward headers
-    const headers = new Headers();
-    req.headers.forEach((val, key) => {
-      const lowerKey = key.toLowerCase();
-      // Drop hop-by-hop headers and host
-      if (lowerKey !== "host" && lowerKey !== "authorization" && lowerKey !== "content-length") {
-        headers.set(key, val);
-      }
-    });
-
-    // Inject active endpoint API Key
-    headers.set("Authorization", `Bearer ${endpoint.apiKey}`);
-
-    if (endpoint.extraHeaders) {
-      for (const [k, v] of Object.entries(endpoint.extraHeaders)) {
-        headers.set(k, v);
-      }
-    }
+    const targetUrl = buildTargetUrl(endpoint.baseUrl, pathWithQuery);
 
     try {
-      const upstreamRes = await fetch(targetUrl, {
-        method,
-        headers,
-        body: method !== "GET" && method !== "HEAD" ? finalBodyText : undefined,
-        signal: req.signal,
-      });
+      const upstreamRes = await forwardToEndpoint(endpoint, req, targetUrl, method, finalBodyText);
 
       // Check if upstream returned rate limit / quota error
       if (upstreamRes.status === 429 || upstreamRes.status === 402) {
@@ -131,24 +224,7 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
         latch.recordSuccess(currentIndex);
       }
 
-      // Forward headers from upstream back to client
-      const responseHeaders = new Headers();
-      upstreamRes.headers.forEach((val, key) => {
-        const lowerKey = key.toLowerCase();
-        if (lowerKey !== "content-encoding" && lowerKey !== "content-length" && lowerKey !== "transfer-encoding") {
-          responseHeaders.set(key, val);
-        }
-      });
-
-      // Add debug indicator headers
-      responseHeaders.set("X-Gateway-Active-Endpoint", endpoint.id);
-      responseHeaders.set("X-Gateway-Attempt", String(attempt + 1));
-
-      return new Response(upstreamRes.body, {
-        status: upstreamRes.status,
-        statusText: upstreamRes.statusText,
-        headers: responseHeaders,
-      });
+      return forwardUpstreamResponse(upstreamRes, endpoint.id, attempt + 1);
     } catch (err: unknown) {
       const errorMsg = (err as Error)?.message || String(err);
       console.error(`\x1b[31m[Fetch Error]\x1b[0m Failed to reach ${endpoint.name} (${targetUrl}): ${errorMsg}`);
