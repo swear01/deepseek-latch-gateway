@@ -341,12 +341,15 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
   const parsedBody = parseRequestBody(rawBodyText);
   if (parsedBody && parsedBody.json !== null && typeof parsedBody.json === "object") {
     const responseFormat = parsedBody.json.response_format;
-    const receivedType =
-      responseFormat === null
-        ? "null"
-        : typeof responseFormat === "object"
-          ? JSON.stringify((responseFormat as { type?: unknown }).type)
-          : typeof responseFormat;
+    let receivedType: string;
+    if (responseFormat === null) {
+      receivedType = "null";
+    } else if (typeof responseFormat === "object") {
+      const type = (responseFormat as { type?: unknown }).type;
+      receivedType = type === undefined ? "<missing>" : JSON.stringify(type);
+    } else {
+      receivedType = typeof responseFormat;
+    }
     if (
       responseFormat !== undefined &&
       (typeof responseFormat !== "object" ||
@@ -356,7 +359,7 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
       return new Response(
         JSON.stringify({
           error: {
-            message: `response_format.type must be "json_object" (got ${receivedType}); json_schema is not supported by DeepSeek chat completions`,
+            message: `response_format.type must be "json_object" (got ${receivedType}); json_schema is not part of the DeepSeek official contract this gateway exposes`,
             type: "invalid_request_error",
             param: "response_format",
             code: "invalid_request_error",
