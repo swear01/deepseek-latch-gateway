@@ -106,7 +106,7 @@ function buildTargetUrl(baseUrl: string, pathWithQuery: string): string {
   return `${cleanBase}${cleanPath}`;
 }
 
-function forwardUpstreamResponse(upstreamRes: Response, endpointId: string, attempt: number): Response {
+function forwardUpstreamResponse(upstreamRes: Response, endpointId: string, upstreamCalls: number): Response {
   const responseHeaders = new Headers();
   upstreamRes.headers.forEach((val, key) => {
     const lowerKey = key.toLowerCase();
@@ -115,7 +115,7 @@ function forwardUpstreamResponse(upstreamRes: Response, endpointId: string, atte
     }
   });
   responseHeaders.set("X-Gateway-Active-Endpoint", endpointId);
-  responseHeaders.set("X-Gateway-Attempt", String(attempt));
+  responseHeaders.set("X-Gateway-Attempt", String(upstreamCalls));
   return new Response(upstreamRes.body, {
     status: upstreamRes.status,
     statusText: upstreamRes.statusText,
@@ -218,6 +218,8 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
   // Endpoints that failed twice with network errors in THIS request: skip them
   // too, so a down endpoint cannot starve the retry budget for healthy peers.
   const networkSkipped = new Set<number>();
+  // Aggregated `endpoint: error` summaries for the final 502 (if any).
+  const networkFailures: string[] = [];
   // Invariant: every loop iteration below adds at least one index to a skip
   // set (or returns), and maxRetries <= poolSize, so at least one un-skipped
   // endpoint always exists when the advance loop runs.
@@ -226,9 +228,11 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
 
   while (attempts < maxRetries) {
     // Pick this attempt's endpoint: start from the latch's active index, but
-    // advance past endpoints this request already saw fail.
+    // advance past endpoints this request already saw fail. Bounded by
+    // poolSize as a defensive guard on the skip-set invariant above.
     let currentIndex = latch.getActiveIndex();
-    while (quotaRejected.has(currentIndex) || networkSkipped.has(currentIndex)) {
+    for (let guard = 0; guard < poolSize; guard++) {
+      if (!quotaRejected.has(currentIndex) && !networkSkipped.has(currentIndex)) break;
       currentIndex = (currentIndex + 1) % poolSize;
     }
 
@@ -298,6 +302,7 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
       // The endpoint failed on both attempts: it is plausibly down, not just
       // hiccuping — skip it for the rest of this request and advance the latch
       // (debounced) so subsequent requests start from the next endpoint.
+      networkFailures.push(`${endpoint.id}: ${networkError}`);
       networkSkipped.add(currentIndex);
       latch.trigger429(currentIndex, `Network/Fetch error: ${networkError}`);
     }
@@ -308,7 +313,7 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
       // definitive 429/quota verdict, report the connectivity failure (502).
       // A definitive quota verdict always wins (429).
       if (networkError && quotaRejected.size === 0) {
-        return unreachableResponse(networkError);
+        return unreachableResponse(networkFailures.join("; "));
       }
       break; // fall through to the 429 response
     }
