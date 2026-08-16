@@ -48,12 +48,18 @@ function parseRequestBody(bodyText: string): { json: Record<string, unknown>; mo
   }
 }
 
-function rewriteRequestBody(bodyText: string, config: GatewayConfig): string {
-  if (!config.models?.aliases || Object.keys(config.models.aliases).length === 0) {
+/**
+ * Apply global model aliases in place on an already-parsed request body.
+ * Returns the original text when nothing changes (byte-preserving).
+ */
+function rewriteRequestBody(
+  parsed: { json: Record<string, unknown>; model?: string } | null,
+  bodyText: string,
+  config: GatewayConfig
+): string {
+  if (!parsed || !config.models?.aliases || Object.keys(config.models.aliases).length === 0) {
     return bodyText;
   }
-  const parsed = parseRequestBody(bodyText);
-  if (!parsed) return bodyText;
   const alias = config.models.aliases[parsed.model || ""];
   if (alias && alias !== parsed.model) {
     parsed.json.model = alias;
@@ -71,10 +77,23 @@ async function forwardToEndpoint(
   modelMap?: Record<string, string>
 ): Promise<Response> {
   let finalBodyText = bodyText;
-  if (modelMap && Object.keys(modelMap).length > 0) {
-    const parsed = parseRequestBody(bodyText);
-    if (parsed && parsed.model && modelMap[parsed.model]) {
-      parsed.json.model = modelMap[parsed.model];
+  const parsed = parseRequestBody(bodyText);
+  if (parsed) {
+    const mappedModel = modelMap && parsed.model ? modelMap[parsed.model] : undefined;
+    const stripResponseFormat =
+      endpoint.compat?.stripResponseFormat &&
+      parsed.json !== null &&
+      typeof parsed.json === "object" &&
+      "response_format" in parsed.json;
+    if (mappedModel || stripResponseFormat) {
+      if (mappedModel) {
+        parsed.json.model = mappedModel;
+      }
+      if (stripResponseFormat) {
+        // Upstream rejects the official response_format param (e.g. Command
+        // Code 400 "Invalid input", OpenCode Go 400 "must contain the word json").
+        delete parsed.json.response_format;
+      }
       finalBodyText = JSON.stringify(parsed.json);
     }
   }
@@ -112,7 +131,7 @@ function buildTargetUrl(baseUrl: string, pathWithQuery: string): string {
   return `${cleanBase}${cleanPath}`;
 }
 
-function forwardUpstreamResponse(upstreamRes: Response, endpointId: string, upstreamCalls: number): Response {
+function buildUpstreamHeaders(upstreamRes: Response, endpointId: string, upstreamCalls: number): Headers {
   const responseHeaders = new Headers();
   upstreamRes.headers.forEach((val, key) => {
     const lowerKey = key.toLowerCase();
@@ -122,11 +141,191 @@ function forwardUpstreamResponse(upstreamRes: Response, endpointId: string, upst
   });
   responseHeaders.set("X-Gateway-Active-Endpoint", endpointId);
   responseHeaders.set("X-Gateway-Attempt", String(upstreamCalls));
-  return new Response(upstreamRes.body, {
-    status: upstreamRes.status,
-    statusText: upstreamRes.statusText,
-    headers: responseHeaders,
-  });
+  return responseHeaders;
+}
+
+/**
+ * Upstream error body double-wrapped as `{"error":{"message":"<JSON>"}}`
+ * (Command Code): parse the inner JSON out so the client sees the official
+ * single-layer error shape. Anything unparseable passes through untouched.
+ */
+function unwrapErrorBody(bodyText: string): string {
+  try {
+    const outer = JSON.parse(bodyText) as { error?: { message?: unknown } };
+    const message = outer?.error?.message;
+    if (typeof message !== "string") return bodyText;
+    const inner = JSON.parse(message) as { error?: unknown };
+    if (inner && typeof inner === "object" && inner.error) {
+      return JSON.stringify(inner);
+    }
+  } catch {
+    // Not the double-wrapped shape: forward verbatim.
+  }
+  return bodyText;
+}
+
+/**
+ * Rename an upstream's non-official reasoning field (e.g. `reasoning`) to the
+ * official `reasoning_content` and drop its companion details field (e.g.
+ * `reasoning_details`) inside every choice's message object.
+ */
+function rewriteReasoningInChoices(choices: unknown, field: string): boolean {
+  if (!Array.isArray(choices)) return false;
+  let changed = false;
+  for (const choice of choices) {
+    // Some upstreams include both `message` and `delta` on a single chunk:
+    // rewrite whichever object carries the field.
+    const messages = [choice?.message, choice?.delta].filter(
+      (m): m is Record<string, unknown> => !!m && typeof m === "object"
+    );
+    for (const message of messages) {
+      if (Object.prototype.hasOwnProperty.call(message, field)) {
+        message.reasoning_content = message[field as keyof typeof message];
+        delete message[field as keyof typeof message];
+        changed = true;
+      }
+      const detailsField = `${field}_details`;
+      if (Object.prototype.hasOwnProperty.call(message, detailsField)) {
+        delete message[detailsField as keyof typeof message];
+        changed = true;
+      }
+    }
+  }
+  return changed;
+}
+
+function rewriteJsonReasoningField(bodyText: string, field: string): string {
+  try {
+    const json = JSON.parse(bodyText) as { choices?: unknown };
+    if (rewriteReasoningInChoices(json.choices, field)) {
+      return JSON.stringify(json);
+    }
+  } catch {
+    // Not JSON we can rewrite: forward verbatim.
+  }
+  return bodyText;
+}
+
+/**
+ * SSE passthrough that rewrites reasoning field names inside each `data:`
+ * JSON payload. Assumes each event's JSON sits on a single `data:` line
+ * (verified empirically for Command Code and OpenCode Go); lines that fail to
+ * parse are forwarded unchanged so a conversion error can never break the
+ * stream, and `data: [DONE]` plus the event framing are untouched.
+ */
+function rewriteSseReasoningField(body: ReadableStream<Uint8Array>, field: string): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  const rewriteLine = (line: string): string => {
+    const trimmed = line.replace(/\r$/, "");
+    if (!trimmed.startsWith("data:")) return line;
+    const payload = trimmed.slice(5).trim();
+    if (!payload.startsWith("{")) return line;
+    try {
+      const json = JSON.parse(payload) as { choices?: unknown };
+      if (rewriteReasoningInChoices(json.choices, field)) {
+        return `data: ${JSON.stringify(json)}`;
+      }
+    } catch {
+      // Unparseable data line (e.g. [DONE]): forward unchanged.
+    }
+    return line;
+  };
+  return body.pipeThrough(
+    new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, controller) {
+        buffer += decoder.decode(chunk, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+        for (const line of lines) {
+          controller.enqueue(encoder.encode(rewriteLine(line) + "\n"));
+        }
+      },
+      flush(controller) {
+        buffer += decoder.decode(); // release any trailing partial multi-byte sequence
+        if (buffer.length > 0) {
+          controller.enqueue(encoder.encode(rewriteLine(buffer) + "\n"));
+        }
+      },
+    })
+  );
+}
+
+/**
+ * Body-consumption failure during response normalization: report a
+ * deterministic 502 instead of throwing into the pool retry loop (a retry
+ * would issue a fresh upstream LLM call for a response the provider already
+ * produced — duplicate billing).
+ */
+function upstreamBodyReadFailure(
+  upstreamRes: Response,
+  endpointId: string,
+  upstreamCalls: number,
+  err: unknown
+): Response {
+  const headers = buildUpstreamHeaders(upstreamRes, endpointId, upstreamCalls);
+  headers.set("Content-Type", "application/json");
+  return new Response(
+    JSON.stringify({
+      error: {
+        message: `Failed to read upstream response body: ${(err as Error)?.message || String(err)}`,
+        type: "gateway_error",
+        code: "upstream_body_read_failed",
+      },
+    }),
+    { status: 502, headers }
+  );
+}
+
+async function forwardUpstreamResponse(
+  upstreamRes: Response,
+  endpoint: EndpointConfig,
+  upstreamCalls: number
+): Promise<Response> {
+  const compat = endpoint.compat;
+  const headers = buildUpstreamHeaders(upstreamRes, endpoint.id, upstreamCalls);
+  const { status, statusText } = upstreamRes;
+
+  // Compat bridges happen only when the endpoint declares a deviation;
+  // otherwise the upstream body is streamed through zero-copy as before.
+  if (compat?.unwrapError && !upstreamRes.ok) {
+    let bodyText: string;
+    try {
+      bodyText = await upstreamRes.text();
+    } catch (err) {
+      return upstreamBodyReadFailure(upstreamRes, endpoint.id, upstreamCalls, err);
+    }
+    headers.set("Content-Type", "application/json"); // body is replaced with JSON
+    return new Response(unwrapErrorBody(bodyText), { status, statusText, headers });
+  }
+
+  if (compat?.responseReasoningField && upstreamRes.ok) {
+    const contentType = upstreamRes.headers.get("content-type") || "";
+    const body = upstreamRes.body;
+    if (body && contentType.includes("text/event-stream")) {
+      return new Response(rewriteSseReasoningField(body, compat.responseReasoningField), {
+        status,
+        statusText,
+        headers,
+      });
+    }
+    if (contentType.includes("application/json")) {
+      let bodyText: string;
+      try {
+        bodyText = await upstreamRes.text();
+      } catch (err) {
+        return upstreamBodyReadFailure(upstreamRes, endpoint.id, upstreamCalls, err);
+      }
+      return new Response(rewriteJsonReasoningField(bodyText, compat.responseReasoningField), {
+        status,
+        statusText,
+        headers,
+      });
+    }
+  }
+
+  return new Response(upstreamRes.body, { status, statusText, headers });
 }
 
 function unreachableResponse(errorMsg: string, target: string = "upstream"): Response {
@@ -156,7 +355,10 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
     rawBodyText = await req.text();
   }
 
-  const originalModel = parseRequestBody(rawBodyText)?.model;
+  // Parse once; all later steps (allowlist, contract check, alias rewrite,
+  // routing) reuse this object instead of re-parsing the same text.
+  const parsedBody = parseRequestBody(rawBodyText);
+  const originalModel = parsedBody?.model;
 
   // --- Model allowlist ---------------------------------------------------------
   // Checked against the original (pre-alias) model: unknown models are rejected
@@ -181,8 +383,52 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
     }
   }
 
-  const finalBodyText = rewriteRequestBody(rawBodyText, config);
-  const requestModel = parseRequestBody(finalBodyText)?.model;
+  // --- Canonical contract strictness ------------------------------------------
+  // DeepSeek official chat completions only support
+  // `response_format: {type: "json_object"}` — never `json_schema` (official
+  // rejects it with invalid_request_error) — but accept `null` (official
+  // contract's way to opt out of JSON mode). Reject anything else at the
+  // router so no client can come to depend on an endpoint's out-of-contract
+  // capability (no upstream call is made).
+  if (parsedBody && parsedBody.json !== null && typeof parsedBody.json === "object") {
+    const responseFormat = parsedBody.json.response_format;
+    let receivedType: string;
+    if (responseFormat === null) {
+      receivedType = "null";
+    } else if (typeof responseFormat === "object") {
+      const type = (responseFormat as { type?: unknown }).type;
+      receivedType = type === undefined ? "<missing>" : JSON.stringify(type);
+    } else {
+      receivedType = typeof responseFormat;
+    }
+    if (
+      responseFormat !== undefined &&
+      responseFormat !== null &&
+      (typeof responseFormat !== "object" ||
+        (responseFormat as { type?: unknown }).type !== "json_object")
+    ) {
+      return new Response(
+        JSON.stringify({
+          error: {
+            message: `response_format.type must be "json_object" (got ${receivedType}); json_schema is not part of the DeepSeek official contract this gateway exposes`,
+            type: "invalid_request_error",
+            param: "response_format",
+            code: "invalid_request_error",
+          },
+        }),
+        {
+          status: 400,
+          headers: { "Content-Type": "application/json" },
+        }
+      );
+    }
+  }
+
+  const finalBodyText = rewriteRequestBody(parsedBody, rawBodyText, config);
+  const requestModel =
+    parsedBody && parsedBody.json !== null && typeof parsedBody.json === "object" && typeof parsedBody.json.model === "string"
+      ? parsedBody.json.model
+      : undefined;
 
   // --- Model-based dedicated routing -------------------------------------------
   // An endpoint declaring `models` handles those incoming models exclusively
@@ -206,7 +452,7 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
         } else if (isRateLimitOrQuotaError(upstreamRes.status, await upstreamRes.clone().text())) {
           latch.record429For(dedicated.id, `Status ${upstreamRes.status}`);
         }
-        return forwardUpstreamResponse(upstreamRes, dedicated.id, 1);
+        return await forwardUpstreamResponse(upstreamRes, dedicated, 1);
       } catch (err: unknown) {
         const errorMsg = (err as Error)?.message || String(err);
         console.error(`\x1b[31m[Fetch Error]\x1b[0m Failed to reach ${dedicated.name} (${targetUrl}): ${errorMsg}`);
@@ -295,7 +541,7 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
           latch.recordSuccess(currentIndex);
         }
 
-        return forwardUpstreamResponse(upstreamRes, endpoint.id, fetchCalls);
+        return await forwardUpstreamResponse(upstreamRes, endpoint, fetchCalls);
       } catch (err: unknown) {
         networkError = (err as Error)?.message || String(err);
         console.error(`\x1b[31m[Fetch Error]\x1b[0m Failed to reach ${endpoint.name} (${targetUrl}): ${networkError}`);

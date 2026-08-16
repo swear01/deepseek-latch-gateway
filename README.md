@@ -52,6 +52,44 @@ Dedicated endpoint traffic is still visible in `/status` (requests / success / 4
 
 ---
 
+## 🎯 DeepSeek Official Contract First (統一正規化)
+
+**Clients always speak the DeepSeek official API contract; the gateway bridges
+endpoint differences automatically.** No client needs per-endpoint workarounds
+(e.g. disabling JSON mode in a harness), because every endpoint's declared
+`compat` deviations are normalized at the proxy layer:
+
+| Normalization | What happens | When |
+|---|---|---|
+| `strip_response_format` | `response_format` removed from the upstream request | upstream 400s on it (Command Code, OpenCode Go) |
+| `response_reasoning_field` | upstream reasoning field renamed to `reasoning_content` (non-streaming `message` **and** SSE `delta`), companion `*_details` field dropped | upstream uses `reasoning`/`reasoning_details` (Command Code) |
+| `unwrap_error` | double-wrapped `{"error":{"message":"<JSON>"}}` error bodies unwrapped to the official single-layer shape | upstream wraps errors twice (Command Code) |
+| `json_schema` rejection | `response_format.type != "json_object"` → official-style 400 `invalid_request_error` at the router, no upstream call | always (official chat completions only support `json_object`) |
+
+An endpoint without `compat` is a **full passthrough** — e.g. DeepSeek official:
+
+```yaml
+endpoints:
+  - id: "command-code"
+    base_url: "https://api.commandcode.ai/provider/v1"
+    compat:
+      strip_response_format: true
+      response_reasoning_field: "reasoning"
+      unwrap_error: true
+
+  - id: "deepseek-official"
+    base_url: "https://api.deepseek.com/v1"
+    # no compat: complete official passthrough
+```
+
+SSE streams are rewritten line-by-line through a `TransformStream` only when an
+endpoint declares `response_reasoning_field`; `data: [DONE]` and the event
+framing are untouched, and any line that fails to parse is forwarded verbatim
+so a conversion error can never break a stream. Endpoints without compat keep
+zero-copy streaming.
+
+---
+
 ## 🚀 Quick Start
 
 ### 1. Prerequisites
