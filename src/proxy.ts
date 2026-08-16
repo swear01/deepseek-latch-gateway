@@ -48,12 +48,18 @@ function parseRequestBody(bodyText: string): { json: Record<string, unknown>; mo
   }
 }
 
-function rewriteRequestBody(bodyText: string, config: GatewayConfig): string {
-  if (!config.models?.aliases || Object.keys(config.models.aliases).length === 0) {
+/**
+ * Apply global model aliases in place on an already-parsed request body.
+ * Returns the original text when nothing changes (byte-preserving).
+ */
+function rewriteRequestBody(
+  parsed: { json: Record<string, unknown>; model?: string } | null,
+  bodyText: string,
+  config: GatewayConfig
+): string {
+  if (!parsed || !config.models?.aliases || Object.keys(config.models.aliases).length === 0) {
     return bodyText;
   }
-  const parsed = parseRequestBody(bodyText);
-  if (!parsed) return bodyText;
   const alias = config.models.aliases[parsed.model || ""];
   if (alias && alias !== parsed.model) {
     parsed.json.model = alias;
@@ -247,10 +253,14 @@ function rewriteSseReasoningField(body: ReadableStream<Uint8Array>, field: strin
  * would issue a fresh upstream LLM call for a response the provider already
  * produced — duplicate billing).
  */
-function upstreamBodyReadFailure(endpointId: string, upstreamCalls: number, err: unknown): Response {
-  const headers = new Headers({ "Content-Type": "application/json" });
-  headers.set("X-Gateway-Active-Endpoint", endpointId);
-  headers.set("X-Gateway-Attempt", String(upstreamCalls));
+function upstreamBodyReadFailure(
+  upstreamRes: Response,
+  endpointId: string,
+  upstreamCalls: number,
+  err: unknown
+): Response {
+  const headers = buildUpstreamHeaders(upstreamRes, endpointId, upstreamCalls);
+  headers.set("Content-Type", "application/json");
   return new Response(
     JSON.stringify({
       error: {
@@ -279,7 +289,7 @@ async function forwardUpstreamResponse(
     try {
       bodyText = await upstreamRes.text();
     } catch (err) {
-      return upstreamBodyReadFailure(endpoint.id, upstreamCalls, err);
+      return upstreamBodyReadFailure(upstreamRes, endpoint.id, upstreamCalls, err);
     }
     return new Response(unwrapErrorBody(bodyText), { status, statusText, headers });
   }
@@ -299,7 +309,7 @@ async function forwardUpstreamResponse(
       try {
         bodyText = await upstreamRes.text();
       } catch (err) {
-        return upstreamBodyReadFailure(endpoint.id, upstreamCalls, err);
+        return upstreamBodyReadFailure(upstreamRes, endpoint.id, upstreamCalls, err);
       }
       return new Response(rewriteJsonReasoningField(bodyText, compat.responseReasoningField), {
         status,
@@ -339,7 +349,10 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
     rawBodyText = await req.text();
   }
 
-  const originalModel = parseRequestBody(rawBodyText)?.model;
+  // Parse once; all later steps (allowlist, contract check, alias rewrite,
+  // routing) reuse this object instead of re-parsing the same text.
+  const parsedBody = parseRequestBody(rawBodyText);
+  const originalModel = parsedBody?.model;
 
   // --- Model allowlist ---------------------------------------------------------
   // Checked against the original (pre-alias) model: unknown models are rejected
@@ -364,8 +377,6 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
     }
   }
 
-  const finalBodyText = rewriteRequestBody(rawBodyText, config);
-
   // --- Canonical contract strictness ------------------------------------------
   // DeepSeek official chat completions only support
   // `response_format: {type: "json_object"}` — never `json_schema` (official
@@ -373,7 +384,6 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
   // contract's way to opt out of JSON mode). Reject anything else at the
   // router so no client can come to depend on an endpoint's out-of-contract
   // capability (no upstream call is made).
-  const parsedBody = parseRequestBody(rawBodyText);
   if (parsedBody && parsedBody.json !== null && typeof parsedBody.json === "object") {
     const responseFormat = parsedBody.json.response_format;
     let receivedType: string;
@@ -407,7 +417,12 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
       );
     }
   }
-  const requestModel = parseRequestBody(finalBodyText)?.model;
+
+  const finalBodyText = rewriteRequestBody(parsedBody, rawBodyText, config);
+  const requestModel =
+    parsedBody && parsedBody.json !== null && typeof parsedBody.json === "object" && typeof parsedBody.json.model === "string"
+      ? parsedBody.json.model
+      : undefined;
 
   // --- Model-based dedicated routing -------------------------------------------
   // An endpoint declaring `models` handles those incoming models exclusively
