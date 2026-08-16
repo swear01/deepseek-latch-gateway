@@ -74,7 +74,11 @@ async function forwardToEndpoint(
   const parsed = parseRequestBody(bodyText);
   if (parsed) {
     const mappedModel = modelMap && parsed.model ? modelMap[parsed.model] : undefined;
-    const stripResponseFormat = endpoint.compat?.stripResponseFormat && "response_format" in parsed.json;
+    const stripResponseFormat =
+      endpoint.compat?.stripResponseFormat &&
+      parsed.json !== null &&
+      typeof parsed.json === "object" &&
+      "response_format" in parsed.json;
     if (mappedModel || stripResponseFormat) {
       if (mappedModel) {
         parsed.json.model = mappedModel;
@@ -335,12 +339,14 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
   // anything else at the router so no client can come to depend on an
   // endpoint's out-of-contract capability (no upstream call is made).
   const parsedBody = parseRequestBody(rawBodyText);
-  if (parsedBody) {
+  if (parsedBody && parsedBody.json !== null && typeof parsedBody.json === "object") {
     const responseFormat = parsedBody.json.response_format;
     const receivedType =
-      typeof responseFormat === "object" && responseFormat !== null
-        ? JSON.stringify((responseFormat as { type?: unknown }).type)
-        : typeof responseFormat;
+      responseFormat === null
+        ? "null"
+        : typeof responseFormat === "object"
+          ? JSON.stringify((responseFormat as { type?: unknown }).type)
+          : typeof responseFormat;
     if (
       responseFormat !== undefined &&
       (typeof responseFormat !== "object" ||

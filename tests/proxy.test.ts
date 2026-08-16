@@ -485,6 +485,40 @@ describe("Proxy & Failover Integration", () => {
     expect(server2Hits).toBe(hitsBefore.s2);
   });
 
+  it("rejects response_format: null with a clear official-style 400", async () => {
+    const config = compatTestConfig(undefined);
+    const latch = new RSLatchManager(config);
+
+    const response = await postChat(latch, config, {
+      model: "deepseek-v4-pro",
+      messages: [{ role: "user", content: "hi" }],
+      response_format: null,
+    });
+
+    expect(response.status).toBe(400);
+    const body = await response.json();
+    expect(body.error.param).toBe("response_format");
+    expect(body.error.message).toContain("got null");
+  });
+
+  it("forwards malformed non-object bodies to the upstream instead of crashing", async () => {
+    const config = compatTestConfig({ stripResponseFormat: true });
+    const latch = new RSLatchManager(config);
+    const hitsBefore = server2Hits;
+
+    // No `model` -> latch pool (19002 mock); a crash would surface as 500/502.
+    for (const rawBody of ["null", '"abc"', "42"]) {
+      const req = new Request("http://127.0.0.1:8080/v1/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: rawBody,
+      });
+      const response = await handleProxyRequest({ req, url: new URL(req.url), latch, config });
+      expect(response.status).toBe(200);
+    }
+    expect(server2Hits).toBe(hitsBefore + 3);
+  });
+
   it("rejects models outside the allowlist", async () => {
     const config: GatewayConfig = {
       server: { host: "127.0.0.1", port: 8080, timeoutSeconds: 10 },
