@@ -123,6 +123,22 @@ function forwardUpstreamResponse(upstreamRes: Response, endpointId: string, atte
   });
 }
 
+function unreachableResponse(errorMsg: string): Response {
+  return new Response(
+    JSON.stringify({
+      error: {
+        message: `Gateway failed to connect to upstream: ${errorMsg}`,
+        type: "gateway_error",
+        code: "upstream_unreachable",
+      },
+    }),
+    {
+      status: 502,
+      headers: { "Content-Type": "application/json" },
+    }
+  );
+}
+
 export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Response> {
   const { req, url, latch, config } = ctx;
   const method = req.method;
@@ -188,19 +204,7 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
       } catch (err: unknown) {
         const errorMsg = (err as Error)?.message || String(err);
         console.error(`\x1b[31m[Fetch Error]\x1b[0m Failed to reach ${dedicated.name} (${targetUrl}): ${errorMsg}`);
-        return new Response(
-          JSON.stringify({
-            error: {
-              message: `Gateway failed to connect to dedicated upstream: ${errorMsg}`,
-              type: "gateway_error",
-              code: "upstream_unreachable",
-            },
-          }),
-          {
-            status: 502,
-            headers: { "Content-Type": "application/json" },
-          }
-        );
+        return unreachableResponse(errorMsg);
       }
     }
   }
@@ -210,14 +214,17 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
   const poolSize = latch.getPoolSize();
   // Endpoints already rejected with 429/402 in THIS request: never re-try them,
   // even when the latch flip was debounced and activeIndex did not move.
-  const rejectedIndices = new Set<number>();
-  let lastNetworkError = "";
+  const quotaRejected = new Set<number>();
+  // Endpoints that failed with network errors on two consecutive attempts in
+  // this request: skip them too, so a down endpoint cannot starve the retries.
+  const networkSkipped = new Set<number>();
+  let lastNetworkFailedIndex = -1;
 
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     // Pick this attempt's endpoint: start from the latch's active index, but
-    // advance past endpoints this request already saw return 429.
+    // advance past endpoints this request already saw fail.
     let currentIndex = latch.getActiveIndex();
-    while (rejectedIndices.has(currentIndex)) {
+    while (quotaRejected.has(currentIndex) || networkSkipped.has(currentIndex)) {
       currentIndex = (currentIndex + 1) % poolSize;
     }
 
@@ -236,7 +243,8 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
           `\x1b[31m[Upstream 429]\x1b[0m ${endpoint.name} (${targetUrl}) returned status ${upstreamRes.status}: ${errText.slice(0, 150)}`
         );
 
-        rejectedIndices.add(currentIndex);
+        lastNetworkFailedIndex = -1;
+        quotaRejected.add(currentIndex);
         latch.trigger429(currentIndex, `Status ${upstreamRes.status}: ${errText.slice(0, 100)}`);
 
         // Next attempt advances to the next endpoint not yet rejected
@@ -251,7 +259,8 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
           console.warn(
             `\x1b[31m[Upstream Quota Error]\x1b[0m ${endpoint.name} returned quota error in status ${upstreamRes.status}: ${errBody.slice(0, 150)}`
           );
-          rejectedIndices.add(currentIndex);
+          lastNetworkFailedIndex = -1;
+          quotaRejected.add(currentIndex);
           latch.trigger429(currentIndex, errBody.slice(0, 100));
           continue;
         }
@@ -272,44 +281,25 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
       // fix a socket/connection failure — it only flaps the latch and makes the
       // next request burn a retry on the (possibly truly exhausted) other key,
       // surfacing as a false "insufficient_quota" even when healthy keys exist.
-      // Retry the same endpoint: a transient socket hiccup usually recovers.
-      lastNetworkError = errorMsg;
+      // Retry the same endpoint once: a transient socket hiccup usually recovers.
       if (attempt < maxRetries - 1) {
+        if (lastNetworkFailedIndex === currentIndex) {
+          // Two consecutive failures on this endpoint: stop retrying it in
+          // this request and probe another endpoint instead.
+          networkSkipped.add(currentIndex);
+        }
+        lastNetworkFailedIndex = currentIndex;
         continue;
       }
 
-      return new Response(
-        JSON.stringify({
-          error: {
-            message: `Gateway failed to connect to upstream: ${errorMsg}`,
-            type: "gateway_error",
-            code: "upstream_unreachable",
-          },
-        }),
-        {
-          status: 502,
-          headers: { "Content-Type": "application/json" },
-        }
-      );
-    }
-  }
-
-  // If any attempt failed to even reach upstream, report the connectivity
-  // failure (502) instead of a false "all quotas exhausted" (429).
-  if (lastNetworkError) {
-    return new Response(
-      JSON.stringify({
-        error: {
-          message: `Gateway failed to connect to upstream: ${lastNetworkError}`,
-          type: "gateway_error",
-          code: "upstream_unreachable",
-        },
-      }),
-      {
-        status: 502,
-        headers: { "Content-Type": "application/json" },
+      // Final attempt could not reach upstream. If some endpoint already gave
+      // a definitive 429/quota verdict, that verdict stands (429); otherwise
+      // the upstream is simply unreachable (502).
+      if (quotaRejected.size === 0) {
+        return unreachableResponse(errorMsg);
       }
-    );
+      break; // fall through to the 429 response
+    }
   }
 
   // All endpoints exhausted with 429

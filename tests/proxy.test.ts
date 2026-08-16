@@ -419,6 +419,125 @@ describe("Proxy & Failover Integration", () => {
     }
   });
 
+  it("reports 429 quota exhaustion when an endpoint gave a definitive 429 verdict, even if a later attempt hit a network error", async () => {
+    const config: GatewayConfig = {
+      server: { host: "127.0.0.1", port: 8080, timeoutSeconds: 10 },
+      strategy: { mode: "latch", debounceSeconds: 0.01, maxRetriesPerRequest: 2 },
+      endpoints: [
+        {
+          id: "ep-1",
+          name: "Mock Upstream 1",
+          baseUrl: "http://127.0.0.1:19001/v1", // 429 mock
+          apiKey: "sk-key-1",
+        },
+        {
+          id: "ep-down",
+          name: "Down Upstream",
+          baseUrl: "http://127.0.0.1:19002/v1",
+          apiKey: "sk-down",
+        },
+      ],
+      models: { aliases: {} },
+    };
+
+    const latch = new RSLatchManager(config);
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: any, init?: any) => {
+      // Only the down endpoint (19002) is unreachable; 19001 must pass through
+      // so the first attempt gets a genuine 429 verdict from the mock.
+      if (String(url).includes("19002")) {
+        throw new Error("The socket connection was closed unexpectedly");
+      }
+      return realFetch(url as any, init as any);
+    }) as typeof fetch;
+
+    try {
+      const clientReq = new Request("http://127.0.0.1:8080/v1/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: "deepseek-v4-flash", messages: [] }),
+      });
+
+      const response = await handleProxyRequest({
+        req: clientReq,
+        url: new URL(clientReq.url),
+        latch,
+        config,
+      });
+
+      // Key 1 responded with a definitive 429; key 2 was unreachable. The quota
+      // verdict must win: report 429 insufficient_quota, not 502.
+      expect(response.status).toBe(429);
+      const body = await response.json();
+      expect(body.error.type).toBe("insufficient_quota");
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  it("probes another endpoint after two consecutive network failures on the same endpoint", async () => {
+    const config: GatewayConfig = {
+      server: { host: "127.0.0.1", port: 8080, timeoutSeconds: 10 },
+      strategy: { mode: "latch", debounceSeconds: 0.01, maxRetriesPerRequest: 3 },
+      endpoints: [
+        {
+          id: "ep-down",
+          name: "Down Upstream",
+          baseUrl: "http://127.0.0.1:19002/v1",
+          apiKey: "sk-down",
+        },
+        {
+          id: "ep-healthy",
+          name: "Healthy Upstream",
+          baseUrl: "http://127.0.0.1:19002/v1",
+          apiKey: "sk-healthy",
+        },
+        {
+          id: "ep-1",
+          name: "Mock Upstream 1",
+          baseUrl: "http://127.0.0.1:19001/v1", // 429 mock (filler: pool must be >= 3 for maxRetries to reach 3)
+          apiKey: "sk-key-1",
+        },
+      ],
+      models: { aliases: {} },
+    };
+
+    const latch = new RSLatchManager(config);
+    const realFetch = globalThis.fetch;
+    let patchedCalls = 0;
+    globalThis.fetch = (async (url: any, init?: any) => {
+      patchedCalls++;
+      if (patchedCalls <= 2) {
+        throw new Error("The socket connection was closed unexpectedly");
+      }
+      return realFetch(url as any, init as any);
+    }) as typeof fetch;
+
+    try {
+      const clientReq = new Request("http://127.0.0.1:8080/v1/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: "deepseek-v4-flash", messages: [] }),
+      });
+
+      const response = await handleProxyRequest({
+        req: clientReq,
+        url: new URL(clientReq.url),
+        latch,
+        config,
+      });
+
+      // ep-down fails twice -> skipped; attempt 3 advances to ep-healthy.
+      expect(response.status).toBe(200);
+      expect(response.headers.get("X-Gateway-Active-Endpoint")).toBe("ep-healthy");
+      expect(response.headers.get("X-Gateway-Attempt")).toBe("3");
+      expect(latch.getActiveIndex()).toBe(0); // never flipped on network errors
+      expect(latch.getStatus().totalSwitches).toBe(0);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
   it("reaches the healthy key even when the latch flip is debounced", async () => {
     const config: GatewayConfig = {
       server: { host: "127.0.0.1", port: 8080, timeoutSeconds: 10 },
