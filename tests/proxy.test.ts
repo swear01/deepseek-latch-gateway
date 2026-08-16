@@ -492,12 +492,6 @@ describe("Proxy & Failover Integration", () => {
           baseUrl: "http://127.0.0.1:19002/v1",
           apiKey: "sk-healthy",
         },
-        {
-          id: "ep-1",
-          name: "Mock Upstream 1",
-          baseUrl: "http://127.0.0.1:19001/v1", // 429 mock (filler: pool must be >= 3 for maxRetries to reach 3)
-          apiKey: "sk-key-1",
-        },
       ],
       models: { aliases: {} },
     };
@@ -527,10 +521,11 @@ describe("Proxy & Failover Integration", () => {
         config,
       });
 
-      // ep-down fails twice -> skipped; attempt 3 advances to ep-healthy.
+      // ep-down fails twice (its free retry) -> skipped; the next slot probes
+      // ep-healthy and succeeds without any latch flip.
       expect(response.status).toBe(200);
       expect(response.headers.get("X-Gateway-Active-Endpoint")).toBe("ep-healthy");
-      expect(response.headers.get("X-Gateway-Attempt")).toBe("3");
+      expect(response.headers.get("X-Gateway-Attempt")).toBe("2");
       expect(latch.getActiveIndex()).toBe(0); // never flipped on network errors
       expect(latch.getStatus().totalSwitches).toBe(0);
     } finally {
