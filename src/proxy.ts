@@ -207,9 +207,20 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
 
   // --- RS-Latch failover pool --------------------------------------------------
   const maxRetries = Math.min(config.strategy.maxRetriesPerRequest, latch.getPoolSize());
+  const poolSize = latch.getPoolSize();
+  // Endpoints already rejected with 429/402 in THIS request: never re-try them,
+  // even when the latch flip was debounced and activeIndex did not move.
+  const rejectedIndices = new Set<number>();
+  let lastNetworkError = "";
 
   for (let attempt = 0; attempt < maxRetries; attempt++) {
-    const currentIndex = latch.getActiveIndex();
+    // Pick this attempt's endpoint: start from the latch's active index, but
+    // advance past endpoints this request already saw return 429.
+    let currentIndex = latch.getActiveIndex();
+    while (rejectedIndices.has(currentIndex)) {
+      currentIndex = (currentIndex + 1) % poolSize;
+    }
+
     const endpoint = latch.getEndpointByIndex(currentIndex);
     latch.recordRequest(currentIndex);
 
@@ -225,9 +236,10 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
           `\x1b[31m[Upstream 429]\x1b[0m ${endpoint.name} (${targetUrl}) returned status ${upstreamRes.status}: ${errText.slice(0, 150)}`
         );
 
+        rejectedIndices.add(currentIndex);
         latch.trigger429(currentIndex, `Status ${upstreamRes.status}: ${errText.slice(0, 100)}`);
 
-        // If we have remaining retry attempts, loop will use the newly switched active index
+        // Next attempt advances to the next endpoint not yet rejected
         continue;
       }
 
@@ -239,6 +251,7 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
           console.warn(
             `\x1b[31m[Upstream Quota Error]\x1b[0m ${endpoint.name} returned quota error in status ${upstreamRes.status}: ${errBody.slice(0, 150)}`
           );
+          rejectedIndices.add(currentIndex);
           latch.trigger429(currentIndex, errBody.slice(0, 100));
           continue;
         }
@@ -254,8 +267,14 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
       const errorMsg = (err as Error)?.message || String(err);
       console.error(`\x1b[31m[Fetch Error]\x1b[0m Failed to reach ${endpoint.name} (${targetUrl}): ${errorMsg}`);
 
+      // Network/fetch failures are NOT quota exhaustion: never flip the RS-Latch
+      // for them. Pool members share one upstream host, so flipping keys cannot
+      // fix a socket/connection failure — it only flaps the latch and makes the
+      // next request burn a retry on the (possibly truly exhausted) other key,
+      // surfacing as a false "insufficient_quota" even when healthy keys exist.
+      // Retry the same endpoint: a transient socket hiccup usually recovers.
+      lastNetworkError = errorMsg;
       if (attempt < maxRetries - 1) {
-        latch.trigger429(currentIndex, `Network/Fetch error: ${errorMsg}`);
         continue;
       }
 
@@ -273,6 +292,24 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
         }
       );
     }
+  }
+
+  // If any attempt failed to even reach upstream, report the connectivity
+  // failure (502) instead of a false "all quotas exhausted" (429).
+  if (lastNetworkError) {
+    return new Response(
+      JSON.stringify({
+        error: {
+          message: `Gateway failed to connect to upstream: ${lastNetworkError}`,
+          type: "gateway_error",
+          code: "upstream_unreachable",
+        },
+      }),
+      {
+        status: 502,
+        headers: { "Content-Type": "application/json" },
+      }
+    );
   }
 
   // All endpoints exhausted with 429
