@@ -16,3 +16,6 @@ The client request body is read once into memory before upstream forwarding. If 
 
 ### 4. Zero-Copy Streaming
 Once upstream responds with `200 OK`, `upstreamResponse.body` is streamed directly to the client response stream. DeepSeek `reasoning_content` and SSE event chunks are preserved without deserialization overhead.
+
+### 5. `response_format` Capability Mismatch
+Command Code Provider API (`api.commandcode.ai/provider/v1`) rejects `response_format` outright with `400 Invalid input, param=response_format` — even for `{"type":"json_object"}`, which DeepSeek itself supports. OpenCode Go's zen/go route instead requires the literal word `json` in the prompt. Both errors surface only with `response_format` set, so the gateway strips it per-endpoint via `strip_response_format: true` (Command Code route) and leaves it untouched for endpoints that support it (e.g. DeepSeek official).

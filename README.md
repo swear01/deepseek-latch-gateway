@@ -41,6 +41,7 @@ endpoints:
     models: ["deepseek-v4-pro"]              # incoming model -> dedicated route
     model_map:
       "deepseek-v4-pro": "deepseek/deepseek-v4-pro"   # outgoing rename
+    strip_response_format: true               # Command Code rejects response_format (400)
 
   - id: "opencode-go-1"
     name: "OpenCode Go (Account 1)"
@@ -49,6 +50,10 @@ endpoints:
 ```
 
 Dedicated endpoint traffic is still visible in `/status` (requests / success / 429 counters).
+
+### `strip_response_format`
+
+Per-endpoint option: drops the incoming `response_format` parameter before forwarding. Endpoints whose upstream rejects the parameter outright (Command Code Provider API returns `400 Invalid input, param=response_format` even for DeepSeek `json_object` mode; OpenCode Go's zen/go route returns `400` unless the prompt contains the literal word `json`) can declare `strip_response_format: true` so standard OpenAI-compatible clients keep sending `response_format` without knowing per-endpoint quirks. Off by default; DeepSeek official API keeps the parameter.
 
 ---
 

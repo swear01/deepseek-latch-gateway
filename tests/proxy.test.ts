@@ -10,6 +10,8 @@ let server1Hits = 0;
 let server2Hits = 0;
 let server3Hits = 0;
 let server3ReceivedModel = "";
+let mockServer4: ReturnType<typeof Bun.serve>;
+let server4ReceivedBody: Record<string, unknown> | null = null;
 
 beforeAll(() => {
   // Mock Upstream 1: Returns 429 Rate Limit
@@ -80,12 +82,23 @@ beforeAll(() => {
       });
     },
   });
+  // Mock Upstream 4: Dedicated route (echoes received body for response_format inspection)
+  mockServer4 = Bun.serve({
+    port: 19004,
+    async fetch(req) {
+      server4ReceivedBody = await req.json();
+      return Response.json({
+        choices: [{ message: { role: "assistant", content: "Stripped body answer." } }],
+      });
+    },
+  });
 });
 
 afterAll(() => {
   mockServer1.stop();
   mockServer2.stop();
   mockServer3.stop();
+  mockServer4.stop();
 });
 
 describe("Proxy & Failover Integration", () => {
@@ -243,6 +256,105 @@ describe("Proxy & Failover Integration", () => {
     expect(flashRes.status).toBe(200);
     expect(flashRes.headers.get("X-Gateway-Active-Endpoint")).toBe("ep-2"); // latch pool (ep-1 429 -> ep-2)
     expect(server3Hits).toBe(hitsBefore.s3 + 1); // dedicated untouched
+  });
+
+  it("strips response_format when the endpoint declares strip_response_format", async () => {
+    const config: GatewayConfig = {
+      server: { host: "127.0.0.1", port: 8080, timeoutSeconds: 10 },
+      strategy: { mode: "latch", debounceSeconds: 0.01, maxRetriesPerRequest: 2 },
+      endpoints: [
+        {
+          id: "dedicated-strip",
+          name: "Strip Upstream",
+          baseUrl: "http://127.0.0.1:19004/v1",
+          apiKey: "sk-strip",
+          models: ["deepseek-v4-pro"],
+          modelMap: { "deepseek-v4-pro": "deepseek/deepseek-v4-pro" },
+          stripResponseFormat: true,
+        },
+        {
+          id: "ep-pool",
+          name: "Pool Member",
+          baseUrl: "http://127.0.0.1:19002/v1",
+          apiKey: "sk-pool",
+        },
+      ],
+      models: { aliases: {} },
+    };
+
+    const latch = new RSLatchManager(config);
+    server4ReceivedBody = null;
+
+    const req = new Request("http://127.0.0.1:8080/v1/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "deepseek-v4-pro",
+        messages: [{ role: "user", content: "Return JSON only" }],
+        response_format: { type: "json_object" },
+        max_completion_tokens: 64,
+      }),
+    });
+
+    const response = await handleProxyRequest({
+      req,
+      url: new URL(req.url),
+      latch,
+      config,
+    });
+
+    expect(response.status).toBe(200);
+    expect(server4ReceivedBody).not.toBeNull();
+    expect(server4ReceivedBody!.response_format).toBeUndefined();
+    expect(server4ReceivedBody!.model).toBe("deepseek/deepseek-v4-pro"); // model_map still applied
+    expect(server4ReceivedBody!.max_completion_tokens).toBe(64); // other params untouched
+  });
+
+  it("preserves response_format when the endpoint does not declare strip_response_format", async () => {
+    const config: GatewayConfig = {
+      server: { host: "127.0.0.1", port: 8080, timeoutSeconds: 10 },
+      strategy: { mode: "latch", debounceSeconds: 0.01, maxRetriesPerRequest: 2 },
+      endpoints: [
+        {
+          id: "dedicated-keep",
+          name: "Passthrough Upstream",
+          baseUrl: "http://127.0.0.1:19004/v1",
+          apiKey: "sk-keep",
+          models: ["deepseek-v4-pro"],
+        },
+        {
+          id: "ep-pool",
+          name: "Pool Member",
+          baseUrl: "http://127.0.0.1:19002/v1",
+          apiKey: "sk-pool",
+        },
+      ],
+      models: { aliases: {} },
+    };
+
+    const latch = new RSLatchManager(config);
+    server4ReceivedBody = null;
+
+    const req = new Request("http://127.0.0.1:8080/v1/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "deepseek-v4-pro",
+        messages: [{ role: "user", content: "Return JSON only" }],
+        response_format: { type: "json_object" },
+      }),
+    });
+
+    const response = await handleProxyRequest({
+      req,
+      url: new URL(req.url),
+      latch,
+      config,
+    });
+
+    expect(response.status).toBe(200);
+    expect(server4ReceivedBody).not.toBeNull();
+    expect(server4ReceivedBody!.response_format).toEqual({ type: "json_object" });
   });
 
   it("rejects models outside the allowlist", async () => {

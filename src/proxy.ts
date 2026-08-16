@@ -71,10 +71,17 @@ async function forwardToEndpoint(
   modelMap?: Record<string, string>
 ): Promise<Response> {
   let finalBodyText = bodyText;
-  if (modelMap && Object.keys(modelMap).length > 0) {
-    const parsed = parseRequestBody(bodyText);
-    if (parsed && parsed.model && modelMap[parsed.model]) {
-      parsed.json.model = modelMap[parsed.model];
+  const parsed = parseRequestBody(bodyText);
+  if (parsed) {
+    const mappedModel = modelMap && parsed.model ? modelMap[parsed.model] : undefined;
+    const hasResponseFormat = "response_format" in parsed.json;
+    if (mappedModel || (endpoint.stripResponseFormat && hasResponseFormat)) {
+      if (mappedModel) {
+        parsed.json.model = mappedModel;
+      }
+      if (endpoint.stripResponseFormat && hasResponseFormat) {
+        delete parsed.json.response_format;
+      }
       finalBodyText = JSON.stringify(parsed.json);
     }
   }

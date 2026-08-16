@@ -25,6 +25,8 @@ interface RawEndpointConfig {
   models?: string[];
   modelMap?: Record<string, string>;
   model_map?: Record<string, string>;
+  stripResponseFormat?: boolean;
+  strip_response_format?: boolean;
 }
 
 interface RawGatewayConfig {
@@ -60,6 +62,7 @@ function resolveEndpoint(raw: RawEndpointConfig, index: number): EndpointConfig 
     weight: raw.weight,
     models: raw.models,
     modelMap: raw.modelMap || raw.model_map,
+    stripResponseFormat: raw.stripResponseFormat ?? raw.strip_response_format ?? false,
   };
 }
 

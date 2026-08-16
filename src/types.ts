@@ -7,6 +7,8 @@ export interface EndpointConfig {
   models?: string[];
   /** Per-endpoint rewrite of the outgoing model name: incoming -> upstream */
   modelMap?: Record<string, string>;
+  /** Drop the incoming `response_format` parameter before forwarding (endpoints whose upstream rejects it, e.g. Command Code Provider API) */
+  stripResponseFormat?: boolean;
   weight?: number;
   extraHeaders?: Record<string, string>;
 }

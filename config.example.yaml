@@ -21,16 +21,22 @@ endpoints:
     models: ["deepseek-v4-pro"]
     model_map:
       "deepseek-v4-pro": "deepseek/deepseek-v4-pro"
+    # Command Code Provider API rejects response_format (400 Invalid input,
+    # param=response_format) even for DeepSeek json_object mode.
+    strip_response_format: true
 
   - id: "opencode-go-1"
     name: "OpenCode Go (Account 1)"
     base_url: "https://opencode.ai/zen/go/v1"
     api_key: "${OPENCODE_API_KEY_1}"
+    # OpenCode Go also rejects response_format (400: prompt must contain the word 'json')
+    strip_response_format: true
 
   - id: "opencode-go-2"
     name: "OpenCode Go (Account 2)"
     base_url: "https://opencode.ai/zen/go/v1"
     api_key: "${OPENCODE_API_KEY_2}"
+    strip_response_format: true
 
   # --- Future Multi-Endpoint Expansion Examples ---
   # - id: "deepseek-official"
