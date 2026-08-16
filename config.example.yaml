@@ -6,7 +6,9 @@ server:
 strategy:
   mode: "latch"                  # RS-Latch sticky failover
   debounce_seconds: 1.0          # Prevents concurrent 429 thundering herd
-  max_retries_per_request: 2     # Max retry attempts per in-flight request
+  max_retries_per_request: 2     # Pool endpoint attempts per request; each attempt
+                                 # includes one free same-endpoint retry for transient
+                                 # network errors (worst case 2x upstream calls)
 
 # RS-Latch cycling pool (Key 1 -> Key 2 -> Key 1)
 # Endpoints declaring `models` are dedicated routes: incoming requests whose

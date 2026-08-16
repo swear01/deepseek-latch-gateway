@@ -18,6 +18,12 @@ Unlike stateless generic proxies (which alternate every request or rely on fixed
 3. **Cycle on Exhaustion**: When Key 2 eventually hits 429, the latch flips back to **Key 1** (or Key 3 if multi-key is configured).
 4. **Debounced Concurrency**: Simultaneous 429s within a 1-second window do not double-increment the latch.
 
+### Retry & Failover Semantics
+
+- **`max_retries_per_request`** is the number of *pool endpoint attempts* per in-flight request. Each endpoint attempt includes one **free same-endpoint retry** for transient network failures (a socket hiccup is retried on the same key; the latch never flips on a single transient failure). Worst case upstream calls per request: `2 × max_retries_per_request`.
+- A key that fails twice with **network errors** in one request is skipped for the rest of that request and the latch advances away from it (debounced) — but network failures are **never counted as 429/quota** in `/status` stats.
+- **`X-Gateway-Attempt`** response header: cumulative number of upstream fetch calls made for the request (includes the free same-endpoint retries).
+
 ---
 
 ## 🧭 Model-Based Dedicated Routing

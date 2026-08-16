@@ -252,9 +252,11 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
     // network failures. Retrying a non-idempotent request can in theory
     // double-execute an upstream call when a connection drops after the
     // provider accepted it; however a fetch rejection here means NO response
-    // headers were ever received, so nothing was relayed to the client, which
-    // would retry the whole request itself on any error response anyway — a
-    // same-endpoint retry is strictly cheaper and keeps failover transparent.
+    // headers were ever received, so nothing was relayed to the client. The
+    // upstream is quota-subscription based (OpenCode Go: weekly usage caps,
+    // no per-call billing), so a retry costs quota, not money — and refusing
+    // to retry would make the client re-issue the whole request itself while
+    // the healthy key sits behind a latch stranded on an exhausted peer.
     for (let inner = 0; inner < SAME_ENDPOINT_ATTEMPTS; inner++) {
       try {
         fetchCalls++;
@@ -311,7 +313,7 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
       // (debounced) so subsequent requests start from the next endpoint.
       networkFailures.push(`${endpoint.id}: ${networkError}`);
       networkSkipped.add(currentIndex);
-      latch.trigger429(currentIndex, `Network/Fetch error: ${networkError}`);
+      latch.advanceOnNetworkFailure(currentIndex, networkError);
     }
     attempts++;
 
@@ -323,7 +325,7 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
         // Detailed per-endpoint failures stay server-side: the client only
         // needs a generic connectivity error, not the pool topology.
         console.error(`[Upstream Unreachable] ${networkFailures.join("; ")}`);
-        return unreachableResponse("all configured upstream endpoints unreachable");
+        return unreachableResponse("all attempted upstream endpoints unreachable");
       }
       break; // fall through to the 429 response
     }

@@ -107,7 +107,26 @@ export class RSLatchManager {
       stat.errors429++;
       stat.last429Time = new Date().toISOString();
     }
+    return this.advanceLatch(fromIndex, reason, now);
+  }
 
+  /**
+   * Advance the latch away from an endpoint that failed repeatedly with
+   * network/connectivity errors (NOT quota exhaustion). Flips exactly like
+   * trigger429 (same debounce) but does not pollute the 429/quota stats.
+   */
+  public advanceOnNetworkFailure(
+    fromIndex: number,
+    reason: string = "Network/Fetch failure"
+  ): { oldIndex: number; newIndex: number; switched: boolean } {
+    return this.advanceLatch(fromIndex, reason, Date.now());
+  }
+
+  private advanceLatch(
+    fromIndex: number,
+    reason: string,
+    now: number
+  ): { oldIndex: number; newIndex: number; switched: boolean } {
     // 1. If activeIndex has already moved past fromIndex, do not switch again
     if (this.activeIndex !== fromIndex) {
       return { oldIndex: fromIndex, newIndex: this.activeIndex, switched: false };
