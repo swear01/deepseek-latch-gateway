@@ -197,9 +197,10 @@ function rewriteJsonReasoningField(bodyText: string, field: string): string {
 
 /**
  * SSE passthrough that rewrites reasoning field names inside each `data:`
- * JSON payload. Lines that fail to parse are forwarded unchanged so a
- * conversion error can never break the stream; `data: [DONE]` and the event
- * framing are untouched.
+ * JSON payload. Assumes each event's JSON sits on a single `data:` line
+ * (verified empirically for Command Code and OpenCode Go); lines that fail to
+ * parse are forwarded unchanged so a conversion error can never break the
+ * stream, and `data: [DONE]` plus the event framing are untouched.
  */
 function rewriteSseReasoningField(body: ReadableStream<Uint8Array>, field: string): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
@@ -240,6 +241,28 @@ function rewriteSseReasoningField(body: ReadableStream<Uint8Array>, field: strin
   );
 }
 
+/**
+ * Body-consumption failure during response normalization: report a
+ * deterministic 502 instead of throwing into the pool retry loop (a retry
+ * would issue a fresh upstream LLM call for a response the provider already
+ * produced — duplicate billing).
+ */
+function upstreamBodyReadFailure(endpointId: string, upstreamCalls: number, err: unknown): Response {
+  const headers = new Headers({ "Content-Type": "application/json" });
+  headers.set("X-Gateway-Active-Endpoint", endpointId);
+  headers.set("X-Gateway-Attempt", String(upstreamCalls));
+  return new Response(
+    JSON.stringify({
+      error: {
+        message: `Failed to read upstream response body: ${(err as Error)?.message || String(err)}`,
+        type: "gateway_error",
+        code: "upstream_body_read_failed",
+      },
+    }),
+    { status: 502, headers }
+  );
+}
+
 async function forwardUpstreamResponse(
   upstreamRes: Response,
   endpoint: EndpointConfig,
@@ -252,7 +275,12 @@ async function forwardUpstreamResponse(
   // Compat bridges happen only when the endpoint declares a deviation;
   // otherwise the upstream body is streamed through zero-copy as before.
   if (compat?.unwrapError && !upstreamRes.ok) {
-    const bodyText = await upstreamRes.text();
+    let bodyText: string;
+    try {
+      bodyText = await upstreamRes.text();
+    } catch (err) {
+      return upstreamBodyReadFailure(endpoint.id, upstreamCalls, err);
+    }
     return new Response(unwrapErrorBody(bodyText), { status, statusText, headers });
   }
 
@@ -267,7 +295,12 @@ async function forwardUpstreamResponse(
       });
     }
     if (contentType.includes("application/json")) {
-      const bodyText = await upstreamRes.text();
+      let bodyText: string;
+      try {
+        bodyText = await upstreamRes.text();
+      } catch (err) {
+        return upstreamBodyReadFailure(endpoint.id, upstreamCalls, err);
+      }
       return new Response(rewriteJsonReasoningField(bodyText, compat.responseReasoningField), {
         status,
         statusText,
@@ -335,9 +368,11 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
 
   // --- Canonical contract strictness ------------------------------------------
   // DeepSeek official chat completions only support
-  // `response_format: {type: "json_object"}` — never `json_schema`. Reject
-  // anything else at the router so no client can come to depend on an
-  // endpoint's out-of-contract capability (no upstream call is made).
+  // `response_format: {type: "json_object"}` — never `json_schema` (official
+  // rejects it with invalid_request_error) — but accept `null` (official
+  // contract's way to opt out of JSON mode). Reject anything else at the
+  // router so no client can come to depend on an endpoint's out-of-contract
+  // capability (no upstream call is made).
   const parsedBody = parseRequestBody(rawBodyText);
   if (parsedBody && parsedBody.json !== null && typeof parsedBody.json === "object") {
     const responseFormat = parsedBody.json.response_format;
@@ -352,8 +387,8 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
     }
     if (
       responseFormat !== undefined &&
+      responseFormat !== null &&
       (typeof responseFormat !== "object" ||
-        responseFormat === null ||
         (responseFormat as { type?: unknown }).type !== "json_object")
     ) {
       return new Response(

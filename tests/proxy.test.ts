@@ -485,9 +485,10 @@ describe("Proxy & Failover Integration", () => {
     expect(server2Hits).toBe(hitsBefore.s2);
   });
 
-  it("rejects response_format: null with a clear official-style 400", async () => {
-    const config = compatTestConfig(undefined);
+  it("allows response_format: null as an official opt-out and strips it for compat endpoints", async () => {
+    const config = compatTestConfig({ stripResponseFormat: true });
     const latch = new RSLatchManager(config);
+    server4ReceivedBody = null;
 
     const response = await postChat(latch, config, {
       model: "deepseek-v4-pro",
@@ -495,10 +496,10 @@ describe("Proxy & Failover Integration", () => {
       response_format: null,
     });
 
-    expect(response.status).toBe(400);
-    const body = await response.json();
-    expect(body.error.param).toBe("response_format");
-    expect(body.error.message).toContain("got null");
+    // null = official "no JSON mode" opt-out: forwarded, not 400'd
+    expect(response.status).toBe(200);
+    expect(server4ReceivedBody).not.toBeNull();
+    expect(server4ReceivedBody!.response_format).toBeUndefined(); // stripped for the compat endpoint
   });
 
   it("forwards malformed non-object bodies to the upstream instead of crashing", async () => {
