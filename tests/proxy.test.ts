@@ -412,8 +412,10 @@ describe("Proxy & Failover Integration", () => {
       expect(response.status).toBe(502);
       const body = await response.json();
       expect(body.error.code).toBe("upstream_unreachable");
+      // Each endpoint failed twice, so the latch advanced away and back
+      // (bounded flip on repeated network failures, not on transient ones).
       expect(latch.getActiveIndex()).toBe(0);
-      expect(latch.getStatus().totalSwitches).toBe(0);
+      expect(latch.getStatus().totalSwitches).toBe(2);
     } finally {
       globalThis.fetch = realFetch;
     }
@@ -521,13 +523,13 @@ describe("Proxy & Failover Integration", () => {
         config,
       });
 
-      // ep-down fails twice (its free retry) -> skipped; the next slot probes
-      // ep-healthy and succeeds without any latch flip.
+      // ep-down fails twice (its free retry) -> skipped and the latch advances
+      // to ep-healthy, which succeeds.
       expect(response.status).toBe(200);
       expect(response.headers.get("X-Gateway-Active-Endpoint")).toBe("ep-healthy");
-      expect(response.headers.get("X-Gateway-Attempt")).toBe("2");
-      expect(latch.getActiveIndex()).toBe(0); // never flipped on network errors
-      expect(latch.getStatus().totalSwitches).toBe(0);
+      expect(response.headers.get("X-Gateway-Attempt")).toBe("3"); // 3 upstream calls
+      expect(latch.getActiveIndex()).toBe(1); // advanced away from the down endpoint
+      expect(latch.getStatus().totalSwitches).toBe(1);
     } finally {
       globalThis.fetch = realFetch;
     }

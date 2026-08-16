@@ -222,6 +222,7 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
   // set (or returns), and maxRetries <= poolSize, so at least one un-skipped
   // endpoint always exists when the advance loop runs.
   let attempts = 0;
+  let fetchCalls = 0; // monotonic upstream attempt counter for X-Gateway-Attempt
 
   while (attempts < maxRetries) {
     // Pick this attempt's endpoint: start from the latch's active index, but
@@ -238,9 +239,14 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
 
     let networkError = "";
     // One original attempt plus one free same-endpoint retry for transient
-    // network failures (never a latch flip: see catch below).
+    // network failures. Retrying a non-idempotent request can in theory
+    // double-execute an upstream call when a connection drops after the
+    // provider accepted it; however a fetch rejection means no response was
+    // relayed to the client, which would retry the whole request itself — a
+    // same-endpoint retry is strictly cheaper and keeps failover transparent.
     for (let inner = 0; inner < 2; inner++) {
       try {
+        fetchCalls++;
         const upstreamRes = await forwardToEndpoint(endpoint, req, targetUrl, method, finalBodyText);
 
         // Check if upstream returned rate limit / quota error
@@ -250,6 +256,7 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
             `\x1b[31m[Upstream 429]\x1b[0m ${endpoint.name} (${targetUrl}) returned status ${upstreamRes.status}: ${errText.slice(0, 150)}`
           );
 
+          networkError = ""; // definitive response supersedes any network error
           quotaRejected.add(currentIndex);
           latch.trigger429(currentIndex, `Status ${upstreamRes.status}: ${errText.slice(0, 100)}`);
           break; // next while iteration advances to the next endpoint
@@ -263,6 +270,7 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
             console.warn(
               `\x1b[31m[Upstream Quota Error]\x1b[0m ${endpoint.name} returned quota error in status ${upstreamRes.status}: ${errBody.slice(0, 150)}`
             );
+            networkError = ""; // definitive response supersedes any network error
             quotaRejected.add(currentIndex);
             latch.trigger429(currentIndex, errBody.slice(0, 100));
             break;
@@ -274,23 +282,24 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
           latch.recordSuccess(currentIndex);
         }
 
-        return forwardUpstreamResponse(upstreamRes, endpoint.id, attempts + inner + 1);
+        return forwardUpstreamResponse(upstreamRes, endpoint.id, fetchCalls);
       } catch (err: unknown) {
         networkError = (err as Error)?.message || String(err);
         console.error(`\x1b[31m[Fetch Error]\x1b[0m Failed to reach ${endpoint.name} (${targetUrl}): ${networkError}`);
         // Network/fetch failures are NOT quota exhaustion: never flip the
-        // RS-Latch for them. Pool members share one upstream host, so flipping
-        // keys cannot fix a socket/connection failure — it only flaps the latch
-        // and makes the next request burn a retry on the (possibly truly
-        // exhausted) other key, surfacing as a false "insufficient_quota" even
-        // when healthy keys exist. The inner loop retries this endpoint once.
+        // RS-Latch on a single transient failure (a hiccup is retried above; a
+        // flip would strand all traffic on the exhausted peer and surface false
+        // "insufficient_quota" errors). Only after the endpoint fails twice is
+        // it treated as down and the latch advanced (see below).
       }
     }
 
-    // This endpoint is unreachable (network error on both attempts): skip it
-    // for the rest of this request and probe another endpoint.
     if (networkError) {
+      // The endpoint failed on both attempts: it is plausibly down, not just
+      // hiccuping — skip it for the rest of this request and advance the latch
+      // (debounced) so subsequent requests start from the next endpoint.
       networkSkipped.add(currentIndex);
+      latch.trigger429(currentIndex, `Network/Fetch error: ${networkError}`);
     }
     attempts++;
 
