@@ -36,6 +36,7 @@ proxy layer. Never ask a client to work around an endpoint (e.g. harness
 Consequences:
 - Command Code needs `strip_response_format` + `response_reasoning_field: "reasoning"` + `unwrap_error`.
 - OpenCode Go needs only `strip_response_format` — its reasoning fields are already official, so SSE stays zero-copy.
+- Post-deploy re-probe (2026-08-16): opencode-go **key 2 currently accepts** `response_format` (200) with thinking on/off and both models; the 400 was observed on key 1 (pre-quota). Keep `strip_response_format` on opencode-go anyway — it is a protective bridge, harmless when the upstream accepts the param.
 - Command Code emits `reasoning` deltas **even when `thinking: {"type":"disabled"}`**; the SSE rewrite handles them regardless.
 
 ### 7. SSE rewriting is conservative
