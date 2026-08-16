@@ -95,6 +95,32 @@ describe("RSLatchManager", () => {
     expect(latch.getActiveIndex()).toBe(0);
   });
 
+  it("advances on repeated network failures without polluting 429 stats", () => {
+    const config = createMockConfig(2, 0.01);
+    const latch = new RSLatchManager(config);
+
+    expect(latch.getActiveIndex()).toBe(0);
+
+    // Two consecutive network failures on the active endpoint advance the latch
+    const res = latch.advanceOnNetworkFailure(0, "socket closed");
+    expect(res.switched).toBe(true);
+    expect(latch.getActiveIndex()).toBe(1);
+
+    // No 429/quota accounting for network failures
+    const status = latch.getStatus();
+    expect(status.endpoints[0].errors429).toBe(0);
+    expect(status.endpoints[0].last429Time).toBeUndefined();
+    expect(status.totalSwitches).toBe(1);
+    expect(status.lastSwitchReason).toContain("socket closed");
+
+    // Debounce applies the same way as trigger429
+    const debounced = latch.advanceOnNetworkFailure(1, "another socket error");
+    expect(debounced.switched).toBe(true); // different index, no debounce for it
+    latch.advanceOnNetworkFailure(0, "immediate repeat");
+    const immediateRepeat = latch.advanceOnNetworkFailure(0, "still within window");
+    expect(immediateRepeat.switched).toBe(false);
+  });
+
   it("provides accurate status report", () => {
     const config = createMockConfig(2);
     const latch = new RSLatchManager(config);

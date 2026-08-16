@@ -8,6 +8,12 @@ interface ProxyRequestContext {
   config: GatewayConfig;
 }
 
+/**
+ * Upstream attempts per pool endpoint per request: the original call plus one
+ * same-endpoint retry for transient network failures (see pool loop below).
+ */
+const SAME_ENDPOINT_ATTEMPTS = 2;
+
 function isRateLimitOrQuotaError(status: number, bodyText: string): boolean {
   if (status === 429 || status === 402) {
     return true;
@@ -106,7 +112,7 @@ function buildTargetUrl(baseUrl: string, pathWithQuery: string): string {
   return `${cleanBase}${cleanPath}`;
 }
 
-function forwardUpstreamResponse(upstreamRes: Response, endpointId: string, attempt: number): Response {
+function forwardUpstreamResponse(upstreamRes: Response, endpointId: string, upstreamCalls: number): Response {
   const responseHeaders = new Headers();
   upstreamRes.headers.forEach((val, key) => {
     const lowerKey = key.toLowerCase();
@@ -115,12 +121,28 @@ function forwardUpstreamResponse(upstreamRes: Response, endpointId: string, atte
     }
   });
   responseHeaders.set("X-Gateway-Active-Endpoint", endpointId);
-  responseHeaders.set("X-Gateway-Attempt", String(attempt));
+  responseHeaders.set("X-Gateway-Attempt", String(upstreamCalls));
   return new Response(upstreamRes.body, {
     status: upstreamRes.status,
     statusText: upstreamRes.statusText,
     headers: responseHeaders,
   });
+}
+
+function unreachableResponse(errorMsg: string, target: string = "upstream"): Response {
+  return new Response(
+    JSON.stringify({
+      error: {
+        message: `Gateway failed to connect to ${target}: ${errorMsg}`,
+        type: "gateway_error",
+        code: "upstream_unreachable",
+      },
+    }),
+    {
+      status: 502,
+      headers: { "Content-Type": "application/json" },
+    }
+  );
 }
 
 export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Response> {
@@ -188,91 +210,123 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
       } catch (err: unknown) {
         const errorMsg = (err as Error)?.message || String(err);
         console.error(`\x1b[31m[Fetch Error]\x1b[0m Failed to reach ${dedicated.name} (${targetUrl}): ${errorMsg}`);
-        return new Response(
-          JSON.stringify({
-            error: {
-              message: `Gateway failed to connect to dedicated upstream: ${errorMsg}`,
-              type: "gateway_error",
-              code: "upstream_unreachable",
-            },
-          }),
-          {
-            status: 502,
-            headers: { "Content-Type": "application/json" },
-          }
-        );
+        return unreachableResponse(errorMsg, "dedicated upstream");
       }
     }
   }
 
   // --- RS-Latch failover pool --------------------------------------------------
   const maxRetries = Math.min(config.strategy.maxRetriesPerRequest, latch.getPoolSize());
+  const poolSize = latch.getPoolSize();
+  // Endpoints already rejected with 429/402 in THIS request: never re-try them,
+  // even when the latch flip was debounced and activeIndex did not move.
+  const quotaRejected = new Set<number>();
+  // Endpoints that failed twice with network errors in THIS request: skip them
+  // too, so a down endpoint cannot starve the retry budget for healthy peers.
+  const networkSkipped = new Set<number>();
+  // Aggregated `endpoint: error` summaries for the final 502 (if any).
+  const networkFailures: string[] = [];
+  // Invariant: every loop iteration below adds at least one index to a skip
+  // set (or returns), and maxRetries <= poolSize, so at least one un-skipped
+  // endpoint always exists when the advance loop runs.
+  let attempts = 0;
+  let fetchCalls = 0; // monotonic upstream attempt counter for X-Gateway-Attempt
 
-  for (let attempt = 0; attempt < maxRetries; attempt++) {
-    const currentIndex = latch.getActiveIndex();
+  while (attempts < maxRetries) {
+    // Pick this attempt's endpoint: start from the latch's active index, but
+    // advance past endpoints this request already saw fail. Bounded by
+    // poolSize as a defensive guard on the skip-set invariant above.
+    let currentIndex = latch.getActiveIndex();
+    for (let guard = 0; guard < poolSize; guard++) {
+      if (!quotaRejected.has(currentIndex) && !networkSkipped.has(currentIndex)) break;
+      currentIndex = (currentIndex + 1) % poolSize;
+    }
+
     const endpoint = latch.getEndpointByIndex(currentIndex);
     latch.recordRequest(currentIndex);
 
     const targetUrl = buildTargetUrl(endpoint.baseUrl, pathWithQuery);
 
-    try {
-      const upstreamRes = await forwardToEndpoint(endpoint, req, targetUrl, method, finalBodyText);
+    let networkError = "";
+    // One original attempt plus one free same-endpoint retry for transient
+    // network failures. Retrying a non-idempotent request can in theory
+    // execute an upstream call twice when a connection drops after the
+    // provider accepted it; however a fetch rejection here means NO response
+    // headers were ever received, so nothing was relayed to the client, and
+    // an LLM client re-issues the whole request on any error anyway — the
+    // retry never increases total quota consumption vs. the no-retry path,
+    // it only succeeds faster. Refusing to retry would strand the healthy key
+    // behind a latch sitting on an exhausted peer (the reported bug).
+    for (let inner = 0; inner < SAME_ENDPOINT_ATTEMPTS; inner++) {
+      try {
+        fetchCalls++;
+        const upstreamRes = await forwardToEndpoint(endpoint, req, targetUrl, method, finalBodyText);
 
-      // Check if upstream returned rate limit / quota error
-      if (upstreamRes.status === 429 || upstreamRes.status === 402) {
-        const errText = await upstreamRes.text();
-        console.warn(
-          `\x1b[31m[Upstream 429]\x1b[0m ${endpoint.name} (${targetUrl}) returned status ${upstreamRes.status}: ${errText.slice(0, 150)}`
-        );
-
-        latch.trigger429(currentIndex, `Status ${upstreamRes.status}: ${errText.slice(0, 100)}`);
-
-        // If we have remaining retry attempts, loop will use the newly switched active index
-        continue;
-      }
-
-      // If response is not 200 OK, check if the error body reveals quota limit
-      if (!upstreamRes.ok) {
-        const cloned = upstreamRes.clone();
-        const errBody = await cloned.text();
-        if (isRateLimitOrQuotaError(upstreamRes.status, errBody)) {
+        // Check if upstream returned rate limit / quota error
+        if (upstreamRes.status === 429 || upstreamRes.status === 402) {
+          const errText = await upstreamRes.text();
           console.warn(
-            `\x1b[31m[Upstream Quota Error]\x1b[0m ${endpoint.name} returned quota error in status ${upstreamRes.status}: ${errBody.slice(0, 150)}`
+            `\x1b[31m[Upstream 429]\x1b[0m ${endpoint.name} (${targetUrl}) returned status ${upstreamRes.status}: ${errText.slice(0, 150)}`
           );
-          latch.trigger429(currentIndex, errBody.slice(0, 100));
-          continue;
+
+          networkError = ""; // definitive response supersedes any network error
+          quotaRejected.add(currentIndex);
+          latch.trigger429(currentIndex, `Status ${upstreamRes.status}: ${errText.slice(0, 100)}`);
+          break; // next while iteration advances to the next endpoint
         }
-      }
 
-      // Success or standard client error (e.g. 400 bad prompt)
-      if (upstreamRes.ok) {
-        latch.recordSuccess(currentIndex);
-      }
-
-      return forwardUpstreamResponse(upstreamRes, endpoint.id, attempt + 1);
-    } catch (err: unknown) {
-      const errorMsg = (err as Error)?.message || String(err);
-      console.error(`\x1b[31m[Fetch Error]\x1b[0m Failed to reach ${endpoint.name} (${targetUrl}): ${errorMsg}`);
-
-      if (attempt < maxRetries - 1) {
-        latch.trigger429(currentIndex, `Network/Fetch error: ${errorMsg}`);
-        continue;
-      }
-
-      return new Response(
-        JSON.stringify({
-          error: {
-            message: `Gateway failed to connect to upstream: ${errorMsg}`,
-            type: "gateway_error",
-            code: "upstream_unreachable",
-          },
-        }),
-        {
-          status: 502,
-          headers: { "Content-Type": "application/json" },
+        // If response is not 200 OK, check if the error body reveals quota limit
+        if (!upstreamRes.ok) {
+          const cloned = upstreamRes.clone();
+          const errBody = await cloned.text();
+          if (isRateLimitOrQuotaError(upstreamRes.status, errBody)) {
+            console.warn(
+              `\x1b[31m[Upstream Quota Error]\x1b[0m ${endpoint.name} returned quota error in status ${upstreamRes.status}: ${errBody.slice(0, 150)}`
+            );
+            networkError = ""; // definitive response supersedes any network error
+            quotaRejected.add(currentIndex);
+            latch.trigger429(currentIndex, errBody.slice(0, 100));
+            break;
+          }
         }
-      );
+
+        // Success or standard client error (e.g. 400 bad prompt)
+        if (upstreamRes.ok) {
+          latch.recordSuccess(currentIndex);
+        }
+
+        return forwardUpstreamResponse(upstreamRes, endpoint.id, fetchCalls);
+      } catch (err: unknown) {
+        networkError = (err as Error)?.message || String(err);
+        console.error(`\x1b[31m[Fetch Error]\x1b[0m Failed to reach ${endpoint.name} (${targetUrl}): ${networkError}`);
+        // Network/fetch failures are NOT quota exhaustion: never flip the
+        // RS-Latch on a single transient failure (a hiccup is retried above; a
+        // flip would strand all traffic on the exhausted peer and surface false
+        // "insufficient_quota" errors). Only after the endpoint fails twice is
+        // it treated as down and the latch advanced (see below).
+      }
     }
+
+    if (networkError) {
+      // The endpoint failed on both attempts: it is plausibly down, not just
+      // hiccuping — skip it for the rest of this request and advance the latch
+      // (debounced) so subsequent requests start from the next endpoint.
+      networkFailures.push(`${endpoint.id}: ${networkError}`);
+      networkSkipped.add(currentIndex);
+      latch.advanceOnNetworkFailure(currentIndex, networkError);
+    }
+    attempts++;
+
+    if (attempts >= maxRetries && networkError && quotaRejected.size === 0) {
+      // If the final endpoint was unreachable AND no endpoint ever gave a
+      // definitive 429/quota verdict, report the connectivity failure (502).
+      // A definitive quota verdict always wins (429).
+      // Detailed per-endpoint failures stay server-side: the client only
+      // needs a generic connectivity error, not the pool topology.
+      console.error(`[Upstream Unreachable] ${networkFailures.join("; ")}`);
+      return unreachableResponse("all attempted upstream endpoints unreachable");
+    }
+    // Otherwise fall through to the 429 response below (loop exits naturally).
   }
 
   // All endpoints exhausted with 429
