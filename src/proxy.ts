@@ -8,6 +8,12 @@ interface ProxyRequestContext {
   config: GatewayConfig;
 }
 
+/**
+ * Upstream attempts per pool endpoint per request: the original call plus one
+ * same-endpoint retry for transient network failures (see pool loop below).
+ */
+const SAME_ENDPOINT_ATTEMPTS = 2;
+
 function isRateLimitOrQuotaError(status: number, bodyText: string): boolean {
   if (status === 429 || status === 402) {
     return true;
@@ -245,10 +251,11 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
     // One original attempt plus one free same-endpoint retry for transient
     // network failures. Retrying a non-idempotent request can in theory
     // double-execute an upstream call when a connection drops after the
-    // provider accepted it; however a fetch rejection means no response was
-    // relayed to the client, which would retry the whole request itself — a
+    // provider accepted it; however a fetch rejection here means NO response
+    // headers were ever received, so nothing was relayed to the client, which
+    // would retry the whole request itself on any error response anyway — a
     // same-endpoint retry is strictly cheaper and keeps failover transparent.
-    for (let inner = 0; inner < 2; inner++) {
+    for (let inner = 0; inner < SAME_ENDPOINT_ATTEMPTS; inner++) {
       try {
         fetchCalls++;
         const upstreamRes = await forwardToEndpoint(endpoint, req, targetUrl, method, finalBodyText);
@@ -313,7 +320,10 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
       // definitive 429/quota verdict, report the connectivity failure (502).
       // A definitive quota verdict always wins (429).
       if (networkError && quotaRejected.size === 0) {
-        return unreachableResponse(networkFailures.join("; "));
+        // Detailed per-endpoint failures stay server-side: the client only
+        // needs a generic connectivity error, not the pool topology.
+        console.error(`[Upstream Unreachable] ${networkFailures.join("; ")}`);
+        return unreachableResponse("all configured upstream endpoints unreachable");
       }
       break; // fall through to the 429 response
     }
