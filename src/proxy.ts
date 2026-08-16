@@ -165,13 +165,13 @@ function rewriteReasoningInChoices(choices: unknown, field: string): boolean {
   for (const choice of choices) {
     const message = choice?.message ?? choice?.delta;
     if (!message || typeof message !== "object") continue;
-    if (field in message) {
+    if (Object.prototype.hasOwnProperty.call(message, field)) {
       message.reasoning_content = message[field as keyof typeof message];
       delete message[field as keyof typeof message];
       changed = true;
     }
     const detailsField = `${field}_details`;
-    if (detailsField in message) {
+    if (Object.prototype.hasOwnProperty.call(message, detailsField)) {
       delete message[detailsField as keyof typeof message];
       changed = true;
     }
@@ -227,6 +227,7 @@ function rewriteSseReasoningField(body: ReadableStream<Uint8Array>, field: strin
         }
       },
       flush(controller) {
+        buffer += decoder.decode(); // release any trailing partial multi-byte sequence
         if (buffer.length > 0) {
           controller.enqueue(encoder.encode(rewriteLine(buffer) + "\n"));
         }
@@ -336,6 +337,10 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
   const parsedBody = parseRequestBody(rawBodyText);
   if (parsedBody) {
     const responseFormat = parsedBody.json.response_format;
+    const receivedType =
+      typeof responseFormat === "object" && responseFormat !== null
+        ? JSON.stringify((responseFormat as { type?: unknown }).type)
+        : typeof responseFormat;
     if (
       responseFormat !== undefined &&
       (typeof responseFormat !== "object" ||
@@ -345,7 +350,7 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
       return new Response(
         JSON.stringify({
           error: {
-            message: `response_format.type must be "json_object"; "json_schema" is not supported by DeepSeek chat completions`,
+            message: `response_format.type must be "json_object" (got ${receivedType}); json_schema is not supported by DeepSeek chat completions`,
             type: "invalid_request_error",
             param: "response_format",
             code: "invalid_request_error",

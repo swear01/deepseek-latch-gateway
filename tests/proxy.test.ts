@@ -478,6 +478,7 @@ describe("Proxy & Failover Integration", () => {
     expect(body.error.type).toBe("invalid_request_error");
     expect(body.error.param).toBe("response_format");
     expect(body.error.code).toBe("invalid_request_error");
+    expect(body.error.message).toContain('got "json_schema"');
     // Dedicated route and latch pool both untouched
     expect(server4Hits).toBe(hitsBefore.s4);
     expect(server1Hits).toBe(hitsBefore.s1);

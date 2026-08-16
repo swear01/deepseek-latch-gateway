@@ -61,12 +61,12 @@ interface RawGatewayConfig {
 function resolveCompat(raw?: RawCompatConfig): EndpointConfig["compat"] {
   if (!raw) return undefined;
   const compat: NonNullable<EndpointConfig["compat"]> = {};
-  if (raw.stripResponseFormat !== undefined) compat.stripResponseFormat = raw.stripResponseFormat;
-  if (raw.strip_response_format !== undefined) compat.stripResponseFormat = raw.strip_response_format;
-  if (raw.responseReasoningField !== undefined) compat.responseReasoningField = raw.responseReasoningField;
-  if (raw.response_reasoning_field !== undefined) compat.responseReasoningField = raw.response_reasoning_field;
-  if (raw.unwrapError !== undefined) compat.unwrapError = raw.unwrapError;
-  if (raw.unwrap_error !== undefined) compat.unwrapError = raw.unwrap_error;
+  const stripResponseFormat = raw.stripResponseFormat ?? raw.strip_response_format;
+  if (stripResponseFormat !== undefined) compat.stripResponseFormat = stripResponseFormat;
+  const responseReasoningField = raw.responseReasoningField ?? raw.response_reasoning_field;
+  if (responseReasoningField !== undefined) compat.responseReasoningField = responseReasoningField;
+  const unwrapError = raw.unwrapError ?? raw.unwrap_error;
+  if (unwrapError !== undefined) compat.unwrapError = unwrapError;
   return Object.keys(compat).length > 0 ? compat : undefined;
 }
 
