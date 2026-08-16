@@ -173,17 +173,22 @@ function rewriteReasoningInChoices(choices: unknown, field: string): boolean {
   if (!Array.isArray(choices)) return false;
   let changed = false;
   for (const choice of choices) {
-    const message = choice?.message ?? choice?.delta;
-    if (!message || typeof message !== "object") continue;
-    if (Object.prototype.hasOwnProperty.call(message, field)) {
-      message.reasoning_content = message[field as keyof typeof message];
-      delete message[field as keyof typeof message];
-      changed = true;
-    }
-    const detailsField = `${field}_details`;
-    if (Object.prototype.hasOwnProperty.call(message, detailsField)) {
-      delete message[detailsField as keyof typeof message];
-      changed = true;
+    // Some upstreams include both `message` and `delta` on a single chunk:
+    // rewrite whichever object carries the field.
+    const messages = [choice?.message, choice?.delta].filter(
+      (m): m is Record<string, unknown> => !!m && typeof m === "object"
+    );
+    for (const message of messages) {
+      if (Object.prototype.hasOwnProperty.call(message, field)) {
+        message.reasoning_content = message[field as keyof typeof message];
+        delete message[field as keyof typeof message];
+        changed = true;
+      }
+      const detailsField = `${field}_details`;
+      if (Object.prototype.hasOwnProperty.call(message, detailsField)) {
+        delete message[detailsField as keyof typeof message];
+        changed = true;
+      }
     }
   }
   return changed;
@@ -291,6 +296,7 @@ async function forwardUpstreamResponse(
     } catch (err) {
       return upstreamBodyReadFailure(upstreamRes, endpoint.id, upstreamCalls, err);
     }
+    headers.set("Content-Type", "application/json"); // body is replaced with JSON
     return new Response(unwrapErrorBody(bodyText), { status, statusText, headers });
   }
 
