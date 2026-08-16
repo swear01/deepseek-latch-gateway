@@ -137,6 +137,9 @@ llm:
 
 ## 🖥️ Fleet Deployment & Service Management
 
+> 完整 rollout 程序（build → 部署 → 驗證 → dsh credentials 同步）見
+> **[`docs/deployment.md`](docs/deployment.md)**。改版後務必照 checklist 執行。
+
 ### Fleet endpoint matrix（每台機器接到的 endpoint）
 
 所有 client（pi models.json / opencode.jsonc / swear-review）一律指向**本機**的 gateway，無跨機連線：
