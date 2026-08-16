@@ -250,13 +250,13 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
     let networkError = "";
     // One original attempt plus one free same-endpoint retry for transient
     // network failures. Retrying a non-idempotent request can in theory
-    // double-execute an upstream call when a connection drops after the
+    // execute an upstream call twice when a connection drops after the
     // provider accepted it; however a fetch rejection here means NO response
-    // headers were ever received, so nothing was relayed to the client. The
-    // upstream is quota-subscription based (OpenCode Go: weekly usage caps,
-    // no per-call billing), so a retry costs quota, not money — and refusing
-    // to retry would make the client re-issue the whole request itself while
-    // the healthy key sits behind a latch stranded on an exhausted peer.
+    // headers were ever received, so nothing was relayed to the client, and
+    // an LLM client re-issues the whole request on any error anyway — the
+    // retry never increases total quota consumption vs. the no-retry path,
+    // it only succeeds faster. Refusing to retry would strand the healthy key
+    // behind a latch sitting on an exhausted peer (the reported bug).
     for (let inner = 0; inner < SAME_ENDPOINT_ATTEMPTS; inner++) {
       try {
         fetchCalls++;
@@ -317,18 +317,16 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
     }
     attempts++;
 
-    if (attempts >= maxRetries) {
+    if (attempts >= maxRetries && networkError && quotaRejected.size === 0) {
       // If the final endpoint was unreachable AND no endpoint ever gave a
       // definitive 429/quota verdict, report the connectivity failure (502).
       // A definitive quota verdict always wins (429).
-      if (networkError && quotaRejected.size === 0) {
-        // Detailed per-endpoint failures stay server-side: the client only
-        // needs a generic connectivity error, not the pool topology.
-        console.error(`[Upstream Unreachable] ${networkFailures.join("; ")}`);
-        return unreachableResponse("all attempted upstream endpoints unreachable");
-      }
-      break; // fall through to the 429 response
+      // Detailed per-endpoint failures stay server-side: the client only
+      // needs a generic connectivity error, not the pool topology.
+      console.error(`[Upstream Unreachable] ${networkFailures.join("; ")}`);
+      return unreachableResponse("all attempted upstream endpoints unreachable");
     }
+    // Otherwise fall through to the 429 response below (loop exits naturally).
   }
 
   // All endpoints exhausted with 429
