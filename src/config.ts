@@ -14,6 +14,15 @@ function interpolateEnv(str?: string): string {
   });
 }
 
+interface RawCompatConfig {
+  stripResponseFormat?: boolean;
+  strip_response_format?: boolean;
+  responseReasoningField?: string;
+  response_reasoning_field?: string;
+  unwrapError?: boolean;
+  unwrap_error?: boolean;
+}
+
 interface RawEndpointConfig {
   id?: string;
   name?: string;
@@ -25,6 +34,7 @@ interface RawEndpointConfig {
   models?: string[];
   modelMap?: Record<string, string>;
   model_map?: Record<string, string>;
+  compat?: RawCompatConfig;
 }
 
 interface RawGatewayConfig {
@@ -48,6 +58,18 @@ interface RawGatewayConfig {
   };
 }
 
+function resolveCompat(raw?: RawCompatConfig): EndpointConfig["compat"] {
+  if (!raw) return undefined;
+  const compat: NonNullable<EndpointConfig["compat"]> = {};
+  if (raw.stripResponseFormat !== undefined) compat.stripResponseFormat = raw.stripResponseFormat;
+  if (raw.strip_response_format !== undefined) compat.stripResponseFormat = raw.strip_response_format;
+  if (raw.responseReasoningField !== undefined) compat.responseReasoningField = raw.responseReasoningField;
+  if (raw.response_reasoning_field !== undefined) compat.responseReasoningField = raw.response_reasoning_field;
+  if (raw.unwrapError !== undefined) compat.unwrapError = raw.unwrapError;
+  if (raw.unwrap_error !== undefined) compat.unwrapError = raw.unwrap_error;
+  return Object.keys(compat).length > 0 ? compat : undefined;
+}
+
 function resolveEndpoint(raw: RawEndpointConfig, index: number): EndpointConfig {
   const id = raw.id || `endpoint-${index + 1}`;
   const rawBaseUrl = raw.baseUrl || raw.base_url || "https://opencode.ai/zen/go/v1";
@@ -60,6 +82,7 @@ function resolveEndpoint(raw: RawEndpointConfig, index: number): EndpointConfig 
     weight: raw.weight,
     models: raw.models,
     modelMap: raw.modelMap || raw.model_map,
+    compat: resolveCompat(raw.compat),
   };
 }
 

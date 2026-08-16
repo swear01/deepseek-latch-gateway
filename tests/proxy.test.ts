@@ -1,15 +1,20 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { RSLatchManager } from "../src/latch";
 import { handleProxyRequest } from "../src/proxy";
-import type { GatewayConfig } from "../src/types";
+import type { EndpointConfig, GatewayConfig } from "../src/types";
 
 let mockServer1: ReturnType<typeof Bun.serve>;
 let mockServer2: ReturnType<typeof Bun.serve>;
 let mockServer3: ReturnType<typeof Bun.serve>;
+let mockServer4: ReturnType<typeof Bun.serve>;
 let server1Hits = 0;
 let server2Hits = 0;
 let server3Hits = 0;
 let server3ReceivedModel = "";
+let server4Hits = 0;
+let server4ReceivedBody: Record<string, unknown> | null = null;
+type Server4Mode = "echo" | "rename" | "double-error" | "plain-error" | "rename-sse";
+let server4Mode: Server4Mode = "echo";
 
 beforeAll(() => {
   // Mock Upstream 1: Returns 429 Rate Limit
@@ -80,13 +85,117 @@ beforeAll(() => {
       });
     },
   });
+  // Mock Upstream 4: Dedicated route with switchable compat behaviors
+  mockServer4 = Bun.serve({
+    port: 19004,
+    async fetch(req) {
+      server4Hits++;
+      const body = await req.json();
+      server4ReceivedBody = body;
+      switch (server4Mode) {
+        case "rename":
+          return Response.json({
+            choices: [
+              {
+                message: {
+                  role: "assistant",
+                  content: "{\"answer\":42}",
+                  reasoning: "Hidden chain of thought.",
+                  reasoning_details: [{ type: "reasoning.text", text: "Hidden chain of thought." }],
+                },
+              },
+            ],
+          });
+        case "double-error":
+          return new Response(
+            JSON.stringify({
+              error: {
+                message: JSON.stringify({
+                  error: {
+                    message: "Invalid input",
+                    type: "invalid_request_error",
+                    param: "response_format",
+                    code: "invalid_request_error",
+                  },
+                }),
+                type: "invalid_request_error",
+              },
+            }),
+            { status: 400, headers: { "Content-Type": "application/json" } }
+          );
+        case "plain-error":
+          return new Response(
+            JSON.stringify({ error: { message: "not json inside at all", type: "invalid_request_error" } }),
+            { status: 400, headers: { "Content-Type": "application/json" } }
+          );
+        case "rename-sse":
+          return new Response(
+            new ReadableStream({
+              start(controller) {
+                const enc = new TextEncoder();
+                controller.enqueue(
+                  enc.encode(
+                    `data: {"choices":[{"delta":{"reasoning":"Think","reasoning_details":[{"type":"reasoning.text","text":"Think"}]}}]}\n\n`
+                  )
+                );
+                controller.enqueue(
+                  enc.encode(`data: {"choices":[{"delta":{"content":"{\"answer\":42}"}}]}\n\n`)
+                );
+                controller.enqueue(enc.encode(`data: [DONE]\n\n`));
+                controller.close();
+              },
+            }),
+            { status: 200, headers: { "Content-Type": "text/event-stream" } }
+          );
+        default:
+          return Response.json({
+            choices: [{ message: { role: "assistant", content: "Echo answer." } }],
+          });
+      }
+    },
+  });
 });
 
 afterAll(() => {
   mockServer1.stop();
   mockServer2.stop();
   mockServer3.stop();
+  mockServer4.stop();
 });
+
+function compatTestConfig(compat: EndpointConfig["compat"]): GatewayConfig {
+  return {
+    server: { host: "127.0.0.1", port: 8080, timeoutSeconds: 10 },
+    strategy: { mode: "latch", debounceSeconds: 0.01, maxRetriesPerRequest: 2 },
+    endpoints: [
+      {
+        id: "dedicated-compat",
+        name: "Compat Upstream",
+        baseUrl: "http://127.0.0.1:19004/v1",
+        apiKey: "sk-compat",
+        models: ["deepseek-v4-pro"],
+        modelMap: { "deepseek-v4-pro": "deepseek/deepseek-v4-pro" },
+        compat,
+      },
+      {
+        id: "ep-pool",
+        name: "Pool Member",
+        baseUrl: "http://127.0.0.1:19002/v1",
+        apiKey: "sk-pool",
+      },
+    ],
+    models: { aliases: {} },
+  };
+}
+
+function postChat(latch: RSLatchManager, config: GatewayConfig, body: Record<string, unknown>) {
+  const req = new Request("http://127.0.0.1:8080/v1/chat/completions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return handleProxyRequest({ req, url: new URL(req.url), latch, config });
+}
 
 describe("Proxy & Failover Integration", () => {
   it("automatically fails over from Key 1 (429) to Key 2 (200) in a single request", async () => {
@@ -243,6 +352,136 @@ describe("Proxy & Failover Integration", () => {
     expect(flashRes.status).toBe(200);
     expect(flashRes.headers.get("X-Gateway-Active-Endpoint")).toBe("ep-2"); // latch pool (ep-1 429 -> ep-2)
     expect(server3Hits).toBe(hitsBefore.s3 + 1); // dedicated untouched
+  });
+
+  it("strips response_format when the endpoint declares compat.strip_response_format", async () => {
+    const config = compatTestConfig({ stripResponseFormat: true });
+    const latch = new RSLatchManager(config);
+    server4ReceivedBody = null;
+
+    const response = await postChat(latch, config, {
+      model: "deepseek-v4-pro",
+      messages: [{ role: "user", content: "Return JSON only" }],
+      response_format: { type: "json_object" },
+      max_completion_tokens: 64,
+    });
+
+    expect(response.status).toBe(200);
+    expect(server4ReceivedBody).not.toBeNull();
+    expect(server4ReceivedBody!.response_format).toBeUndefined();
+    expect(server4ReceivedBody!.model).toBe("deepseek/deepseek-v4-pro"); // model_map still applied
+    expect(server4ReceivedBody!.max_completion_tokens).toBe(64); // other params untouched
+  });
+
+  it("preserves response_format when the endpoint declares no compat", async () => {
+    const config = compatTestConfig(undefined);
+    const latch = new RSLatchManager(config);
+    server4ReceivedBody = null;
+
+    const response = await postChat(latch, config, {
+      model: "deepseek-v4-pro",
+      messages: [{ role: "user", content: "Return JSON only" }],
+      response_format: { type: "json_object" },
+    });
+
+    expect(response.status).toBe(200);
+    expect(server4ReceivedBody).not.toBeNull();
+    expect(server4ReceivedBody!.response_format).toEqual({ type: "json_object" });
+  });
+
+  it("renames a non-official reasoning field to reasoning_content and drops its details field", async () => {
+    const config = compatTestConfig({ responseReasoningField: "reasoning" });
+    const latch = new RSLatchManager(config);
+    server4Mode = "rename";
+
+    const response = await postChat(latch, config, {
+      model: "deepseek-v4-pro",
+      messages: [{ role: "user", content: "Return JSON only" }],
+    });
+
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    const message = body.choices[0].message;
+    expect(message.reasoning_content).toBe("Hidden chain of thought.");
+    expect(message.reasoning).toBeUndefined();
+    expect(message.reasoning_details).toBeUndefined();
+    expect(message.content).toBe('{"answer":42}'); // other fields untouched
+  });
+
+  it("unwraps double-wrapped upstream errors into the official single-layer shape", async () => {
+    const config = compatTestConfig({ unwrapError: true });
+    const latch = new RSLatchManager(config);
+    server4Mode = "double-error";
+
+    const response = await postChat(latch, config, {
+      model: "deepseek-v4-pro",
+      messages: [{ role: "user", content: "hi" }],
+    });
+
+    expect(response.status).toBe(400);
+    const body = await response.json();
+    expect(body.error.message).toBe("Invalid input"); // single layer, no nested JSON string
+    expect(body.error.type).toBe("invalid_request_error");
+    expect(body.error.param).toBe("response_format");
+    expect(body.error.code).toBe("invalid_request_error");
+    expect(typeof body.error.message).toBe("string");
+  });
+
+  it("forwards upstream errors verbatim when the error body is not double-wrapped", async () => {
+    const config = compatTestConfig({ unwrapError: true });
+    const latch = new RSLatchManager(config);
+    server4Mode = "plain-error";
+
+    const response = await postChat(latch, config, {
+      model: "deepseek-v4-pro",
+      messages: [{ role: "user", content: "hi" }],
+    });
+
+    expect(response.status).toBe(400);
+    const body = await response.json();
+    expect(body.error.message).toBe("not json inside at all"); // unchanged passthrough
+  });
+
+  it("rewrites reasoning field names in SSE deltas and preserves [DONE]", async () => {
+    const config = compatTestConfig({ responseReasoningField: "reasoning" });
+    const latch = new RSLatchManager(config);
+    server4Mode = "rename-sse";
+
+    const response = await postChat(latch, config, {
+      model: "deepseek-v4-pro",
+      messages: [{ role: "user", content: "hi" }],
+      stream: true,
+    });
+
+    expect(response.status).toBe(200);
+    const text = await response.text();
+    expect(text).toContain('"reasoning_content":"Think"');
+    expect(text).toContain('"content":"{\"answer\":42}"');
+    expect(text).not.toContain('"reasoning":');
+    expect(text).not.toContain("reasoning_details");
+    expect(text).toContain("data: [DONE]");
+  });
+
+  it("rejects response_format.type json_schema at the router without touching any upstream", async () => {
+    const config = compatTestConfig(undefined);
+    const latch = new RSLatchManager(config);
+    const hitsBefore = { s4: server4Hits, s1: server1Hits, s2: server2Hits };
+
+    const response = await postChat(latch, config, {
+      model: "deepseek-v4-pro",
+      messages: [{ role: "user", content: "hi" }],
+      response_format: { type: "json_schema", json_schema: { name: "x", schema: {} } },
+    });
+
+    expect(response.status).toBe(400);
+    const body = await response.json();
+    expect(body.error.type).toBe("invalid_request_error");
+    expect(body.error.param).toBe("response_format");
+    expect(body.error.code).toBe("invalid_request_error");
+    // Dedicated route and latch pool both untouched
+    expect(server4Hits).toBe(hitsBefore.s4);
+    expect(server1Hits).toBe(hitsBefore.s1);
+    expect(server2Hits).toBe(hitsBefore.s2);
   });
 
   it("rejects models outside the allowlist", async () => {

@@ -13,6 +13,12 @@ strategy:
 # RS-Latch cycling pool (Key 1 -> Key 2 -> Key 1)
 # Endpoints declaring `models` are dedicated routes: incoming requests whose
 # model matches are forwarded there directly (bypassing the RS-Latch pool).
+#
+# Canonical contract: every client speaks the DeepSeek official API shape
+# (response_format json_object, thinking, reasoning_content, single-layer
+# errors). `compat` declares an endpoint's deviations from that contract and
+# the gateway bridges them automatically — omit `compat` for full passthrough
+# (e.g. DeepSeek official).
 endpoints:
   - id: "command-code"
     name: "Command Code (V4 Pro)"
@@ -21,22 +27,31 @@ endpoints:
     models: ["deepseek-v4-pro"]
     model_map:
       "deepseek-v4-pro": "deepseek/deepseek-v4-pro"
+    compat:
+      strip_response_format: true      # upstream 400s on response_format -> strip it
+      response_reasoning_field: "reasoning"  # upstream uses reasoning/reasoning_details; gateway renames to reasoning_content (incl. SSE deltas)
+      unwrap_error: true               # upstream double-wraps errors -> unwrap to official single-layer shape
 
   - id: "opencode-go-1"
     name: "OpenCode Go (Account 1)"
     base_url: "https://opencode.ai/zen/go/v1"
     api_key: "${OPENCODE_API_KEY_1}"
+    compat:
+      strip_response_format: true      # upstream 400s on response_format -> strip it
 
   - id: "opencode-go-2"
     name: "OpenCode Go (Account 2)"
     base_url: "https://opencode.ai/zen/go/v1"
     api_key: "${OPENCODE_API_KEY_2}"
+    compat:
+      strip_response_format: true
 
   # --- Future Multi-Endpoint Expansion Examples ---
   # - id: "deepseek-official"
   #   name: "DeepSeek Official API"
   #   base_url: "https://api.deepseek.com/v1"
   #   api_key: "${DEEPSEEK_API_KEY}"
+  #   # no compat: full official passthrough
 
 # Model Allowlist (required policy: only these two models exist)
 models:

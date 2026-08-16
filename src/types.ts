@@ -1,3 +1,17 @@
+/**
+ * Declared deviations from the canonical DeepSeek official API contract.
+ * The gateway exposes the official contract to every client and bridges these
+ * deviations per-endpoint; an endpoint without `compat` is a full passthrough.
+ */
+export interface EndpointCompat {
+  /** Upstream rejects `response_format` -> drop it before forwarding */
+  stripResponseFormat?: boolean;
+  /** Non-official reasoning field name in upstream responses (official: `reasoning_content`); renamed in both non-streaming messages and SSE deltas */
+  responseReasoningField?: string;
+  /** Upstream wraps errors twice (`{"error":{"message":"<JSON>"}}`) -> unwrap to the official single-layer shape */
+  unwrapError?: boolean;
+}
+
 export interface EndpointConfig {
   id: string;
   name: string;
@@ -7,6 +21,8 @@ export interface EndpointConfig {
   models?: string[];
   /** Per-endpoint rewrite of the outgoing model name: incoming -> upstream */
   modelMap?: Record<string, string>;
+  /** Declared deviations from the canonical DeepSeek API contract (default: full passthrough) */
+  compat?: EndpointCompat;
   weight?: number;
   extraHeaders?: Record<string, string>;
 }
