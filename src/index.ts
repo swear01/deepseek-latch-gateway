@@ -1,10 +1,11 @@
 import { loadConfig } from "./config";
 import { RSLatchManager } from "./latch";
+import { PriorityLatchManager } from "./priority-latch";
 import { handleProxyRequest } from "./proxy";
 
 const configPath = process.argv[2] || process.env.GATEWAY_CONFIG;
 const config = loadConfig(configPath);
-const latch = new RSLatchManager(config);
+const latch = config.routing ? new PriorityLatchManager(config) : new RSLatchManager(config);
 
 const server = Bun.serve({
   hostname: config.server.host,
@@ -70,11 +71,16 @@ const server = Bun.serve({
 console.log(
   `\x1b[32m🚀 DeepSeek Latch Gateway running on http://${server.hostname}:${server.port}\x1b[0m`
 );
-console.log(`[Config] Configured ${config.endpoints.length} endpoints in RS-Latch pool:`);
+console.log(`[Config] Configured ${config.endpoints.length} provider endpoints`);
 config.endpoints.forEach((ep, i) => {
   console.log(`  [${i}] ${ep.name} (${ep.id}) -> ${ep.baseUrl}`);
 });
-console.log(`[Status] Active Initial Endpoint: [0] ${config.endpoints[0].name}`);
+if (config.routing) {
+  for (const [model, route] of Object.entries(config.routing.routes)) {
+    console.log(`[Routing] ${model}: ${route.groups.map((group) => `${group.priority}:${group.id}`).join(" -> ")}`);
+  }
+}
+console.log(`[Status] Active Initial Endpoint: [0] ${latch.getActiveEndpoint().name}`);
 
 process.on("SIGINT", () => {
   console.log("\n[Gateway] Shutting down...");

@@ -1,10 +1,11 @@
 import type { GatewayConfig, EndpointConfig } from "./types";
 import type { RSLatchManager } from "./latch";
+import { PriorityLatchManager } from "./priority-latch";
 
 interface ProxyRequestContext {
   req: Request;
   url: URL;
-  latch: RSLatchManager;
+  latch: RSLatchManager | PriorityLatchManager;
   config: GatewayConfig;
 }
 
@@ -344,6 +345,100 @@ function unreachableResponse(errorMsg: string, target: string = "upstream"): Res
   );
 }
 
+async function handlePriorityProxyRequest(ctx: {
+  req: Request;
+  url: URL;
+  latch: PriorityLatchManager;
+  config: GatewayConfig;
+  model: string;
+  bodyText: string;
+}): Promise<Response> {
+  const { req, url, latch, config, model, bodyText } = ctx;
+  const method = req.method;
+  const pathWithQuery = url.pathname + url.search;
+  const maxAttempts = Math.min(config.strategy.maxRetriesPerRequest, latch.getRouteSize(model));
+  const rejected = new Set<string>();
+  const quotaRejected = new Set<string>();
+  const networkFailures: string[] = [];
+  let attempts = 0;
+  let fetchCalls = 0;
+
+  while (attempts < maxAttempts) {
+    const attempt = latch.getAttempt(model, rejected);
+    if (!attempt) break;
+    const endpoint = attempt.endpoint;
+    const targetUrl = buildTargetUrl(endpoint.baseUrl, pathWithQuery);
+    const modelMap = attempt.upstreamModel ? { [model]: attempt.upstreamModel } : undefined;
+    latch.recordRequest(model, attempt);
+
+    let networkError = "";
+    for (let inner = 0; inner < SAME_ENDPOINT_ATTEMPTS; inner++) {
+      try {
+        fetchCalls++;
+        const upstreamRes = await forwardToEndpoint(
+          endpoint,
+          req,
+          targetUrl,
+          method,
+          bodyText,
+          modelMap
+        );
+
+        if (upstreamRes.status === 429 || upstreamRes.status === 402) {
+          const errText = await upstreamRes.text();
+          networkError = "";
+          rejected.add(attempt.key);
+          quotaRejected.add(attempt.key);
+          latch.record429(model, attempt);
+          latch.advance(model, attempt, `Status ${upstreamRes.status}: ${errText.slice(0, 100)}`);
+          break;
+        }
+
+        if (!upstreamRes.ok) {
+          const errBody = await upstreamRes.clone().text();
+          if (isRateLimitOrQuotaError(upstreamRes.status, errBody)) {
+            networkError = "";
+            rejected.add(attempt.key);
+            quotaRejected.add(attempt.key);
+            latch.record429(model, attempt);
+            latch.advance(model, attempt, errBody.slice(0, 100));
+            break;
+          }
+        }
+
+        if (upstreamRes.ok) latch.recordSuccess(model, attempt);
+        return await forwardUpstreamResponse(upstreamRes, endpoint, fetchCalls);
+      } catch (err: unknown) {
+        networkError = (err as Error)?.message || String(err);
+        console.error(`\\x1b[31m[Fetch Error]\\x1b[0m Failed to reach ${endpoint.name} (${targetUrl}): ${networkError}`);
+      }
+    }
+
+    if (networkError) {
+      rejected.add(attempt.key);
+      networkFailures.push(`${endpoint.id}: ${networkError}`);
+      latch.advance(model, attempt, networkError);
+    }
+    attempts++;
+
+    if (attempts >= maxAttempts && networkError && quotaRejected.size === 0) {
+      console.error(`[Upstream Unreachable] ${networkFailures.join("; ")}`);
+      return unreachableResponse("all attempted upstream endpoints unreachable");
+    }
+  }
+
+  return new Response(
+    JSON.stringify({
+      error: {
+        message: "All priority groups for this route are exhausted or rate-limited.",
+        type: "insufficient_quota",
+        code: 429,
+      },
+    }),
+    { status: 429, headers: { "Content-Type": "application/json" } }
+  );
+}
+
 export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Response> {
   const { req, url, latch, config } = ctx;
   const method = req.method;
@@ -430,6 +525,30 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
       ? parsedBody.json.model
       : undefined;
 
+  if (latch instanceof PriorityLatchManager) {
+    const routedModel = requestModel || latch.getDefaultModel();
+    if (!latch.hasRoute(routedModel)) {
+      return new Response(
+        JSON.stringify({
+          error: {
+            message: `No priority route configured for model: ${routedModel}`,
+            type: "invalid_request_error",
+            code: "route_not_configured",
+          },
+        }),
+        { status: 400, headers: { "Content-Type": "application/json" } }
+      );
+    }
+    return handlePriorityProxyRequest({
+      req,
+      url,
+      latch,
+      config,
+      model: routedModel,
+      bodyText: finalBodyText,
+    });
+  }
+
   // --- Model-based dedicated routing -------------------------------------------
   // An endpoint declaring `models` handles those incoming models exclusively
   // (bypasses the RS-Latch pool). Others fall through to the latch pool below.
@@ -506,7 +625,14 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
     for (let inner = 0; inner < SAME_ENDPOINT_ATTEMPTS; inner++) {
       try {
         fetchCalls++;
-        const upstreamRes = await forwardToEndpoint(endpoint, req, targetUrl, method, finalBodyText);
+        const upstreamRes = await forwardToEndpoint(
+          endpoint,
+          req,
+          targetUrl,
+          method,
+          finalBodyText,
+          endpoint.modelMap
+        );
 
         // Check if upstream returned rate limit / quota error
         if (upstreamRes.status === 429 || upstreamRes.status === 402) {

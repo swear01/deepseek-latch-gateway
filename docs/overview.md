@@ -1,21 +1,26 @@
 # DeepSeek Latch Gateway — Overview
 
-## Project Overview
+`deepseek-latch-gateway` is a lightweight OpenAI-compatible gateway for DeepSeek
+models and multiple OpenCode Go accounts.
 
-`deepseek-latch-gateway` is a specialized, lightweight AI reverse proxy and gateway designed for **DeepSeek series models** (`deepseek-v4-flash`, `deepseek-v4-pro`, `deepseek-chat`, `deepseek-reasoner`) and **OpenCode Go multi-subscription accounts**.
+## Routing model
 
-## The Problem
-Power users subscribing to multiple OpenCode Go or DeepSeek accounts often hit hourly or daily token limits. Generic load balancers alternate traffic across keys, exhausting both concurrently. Standard fallbacks repeatedly hit failed keys before retrying, adding latency to every request.
+Routing is hierarchical rather than a flat endpoint list:
 
-## The Solution: RS-Latch State Machine
-`deepseek-latch-gateway` implements a stateful **RS-Latch (Bistable Sticky Failover)**:
-- Requests stick to Key 1 until it returns `429 Too Many Requests` or Quota Exceeded.
-- Upon 429, the latch flips to Key 2, immediately retries the in-flight request, and locks all subsequent requests to Key 2.
-- When Key 2 eventually hits 429, the latch flips back to Key 1 (or the next configured endpoint).
-- Debounce mechanisms prevent concurrent thundering herds from flipping the latch multiple times.
+- Priority 1 is an RS-Latch group containing the OpenCode Go accounts.
+- Priority 2 is the Command Code fallback group.
+- A group is exhausted before the outer route advances to the next priority.
+- Route-specific upstream model names are kept in `routing.yaml`.
+- Provider URLs, credentials, and compatibility behavior remain in `config.yaml`.
 
-## Target Consumers
-1. **Pi Agent** across 7 HAPI fleet machines (`swairM5`, `mazu`, `athena`, `valkyrie`, `cthulhu`, `zeus`, `oracle`).
-2. **Swear Review** on Oracle Cloud (`/opt/swear-review`).
-3. **DeepSeek Harness** (Evaluation & benchmarking pipelines).
-4. Any standard OpenAI / Anthropic compatible client.
+The Flash route therefore tries OpenCode accounts 1, 2, and 3 before using
+Command Code with `deepseek/deepseek-v4-flash`. The Pro route references the
+same Command Code provider with `deepseek/deepseek-v4-pro`.
+
+## Target consumers
+
+1. Pi Agent across the HAPI fleet.
+2. DeepSeek Harness for evaluation and benchmarking.
+3. Any standard OpenAI-compatible client.
+
+Swear Review is an external consumer and is not modified by this project.

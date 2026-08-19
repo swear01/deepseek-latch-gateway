@@ -6,49 +6,61 @@ Features a stateful **RS-Latch (Bistable Sticky Failover)** mechanism that compl
 
 ---
 
-## ⚡ Core Mechanism: RS-Latch State Machine
+## ⚡ Core Mechanism: Hierarchical Priority Latch
 
-Unlike stateless generic proxies (which alternate every request or rely on fixed cooldown timers), **DeepSeek Latch Gateway** maintains a sticky active key state:
+The gateway uses an outer priority chain and an independent RS-Latch inside each priority group:
 
-1. **Sticky State**: All requests stick to **Key 1** as long as it returns `200 OK`.
-2. **Latch Flip on 429**: When Key 1 hits `429 Too Many Requests` or Quota Limits:
-   - The latch flips to **Key 2**.
-   - The current in-flight request is immediately and transparently retried with Key 2.
-   - **All subsequent requests permanently stick to Key 2**.
-3. **Cycle on Exhaustion**: When Key 2 eventually hits 429, the latch flips back to **Key 1** (or Key 3 if multi-key is configured).
-4. **Debounced Concurrency**: Simultaneous 429s within a 1-second window do not double-increment the latch.
+```text
+Priority 1: OpenCode Go latch
+  Account 1 → Account 2 → Account 3
+
+Priority 2: Command Code latch
+  Command Code (last fallback)
+```
+
+1. Requests stay on the active OpenCode account while it succeeds.
+2. A quota response advances within the Priority 1 OpenCode latch.
+3. Only after all three OpenCode accounts are exhausted does the request enter Priority 2.
+4. Command Code uses the same provider definition for Flash fallback and Pro routing.
+5. The outer latch does not immediately cycle back to an exhausted higher-priority group.
 
 ### Retry & Failover Semantics
 
-- **`max_retries_per_request`** is the number of *pool endpoint attempts* per in-flight request. Each endpoint attempt includes one **free same-endpoint retry** for transient network failures (a socket hiccup is retried on the same key; the latch never flips on a single transient failure). Worst case upstream calls per request: `2 × max_retries_per_request`.
-- A key that fails twice with **network errors** in one request is skipped for the rest of that request and the latch advances away from it (debounced) — but network failures are **never counted as 429/quota** in `/status` stats.
-- **`X-Gateway-Attempt`** response header: cumulative number of upstream fetch calls made for the request (includes the free same-endpoint retries).
+- `max_retries_per_request` bounds endpoint attempts across the selected route. Each endpoint attempt includes one same-endpoint retry for transient network failures.
+- A definitive quota response advances the current group; two network failures skip that endpoint for the current request without counting as a 429.
+- `X-Gateway-Attempt` reports cumulative upstream fetch calls, including same-endpoint retries.
 
 ---
 
-## 🧭 Model-Based Dedicated Routing
+## 🧭 Routing Is Separate From Providers
 
-An endpoint declaring a `models` list becomes a **dedicated route**: incoming requests whose `model` matches are forwarded directly to that endpoint, **bypassing the RS-Latch pool entirely**. All other models flow through the latch pool as usual.
-
-Optional `model_map` rewrites the outgoing model name per endpoint (e.g. Command Code uses a `deepseek/`-namespaced catalog):
+`config.yaml` contains provider/runtime settings only: URLs, environment-variable
+references, compatibility bridges, and the model allowlist. `routing.yaml`
+contains model priority, group mode, endpoint order, and route-specific upstream
+model names.
 
 ```yaml
-endpoints:
-  - id: "command-code"
-    name: "Command Code (V4 Pro)"
-    base_url: "https://api.commandcode.ai/provider/v1"
-    api_key: "${COMMAMD_CODE_API_KEY}"
-    models: ["deepseek-v4-pro"]              # incoming model -> dedicated route
-    model_map:
-      "deepseek-v4-pro": "deepseek/deepseek-v4-pro"   # outgoing rename
-
-  - id: "opencode-go-1"
-    name: "OpenCode Go (Account 1)"
-    base_url: "https://opencode.ai/zen/go/v1"
-    api_key: "${OPENCODE_API_KEY_1}"        # no models -> latch pool member
+routes:
+  deepseek-v4-flash:
+    mode: "priority-latch"
+    priority_groups:
+      - id: "opencode-go"
+        priority: 1
+        mode: "latch"
+        members:
+          - endpoint: "opencode-go-1"
+          - endpoint: "opencode-go-2"
+          - endpoint: "opencode-go-3"
+      - id: "command-code-fallback"
+        priority: 2
+        mode: "latch"
+        members:
+          - endpoint: "command-code"
+            upstream_model: "deepseek/deepseek-v4-flash"
 ```
 
-Dedicated endpoint traffic is still visible in `/status` (requests / success / 429 counters).
+The same `command-code` provider can be referenced by the Pro route with a
+different `upstream_model`; it is not duplicated in the provider list.
 
 ---
 
@@ -96,16 +108,18 @@ zero-copy streaming.
 - [Bun](https://bun.sh) (v1.2+)
 
 ### 2. Setup Configuration
-Copy `config.example.yaml` to `config.yaml`:
+Copy both configuration templates:
 ```bash
 cp config.example.yaml config.yaml
+cp routing.example.yaml routing.yaml
 ```
 
 Set your keys in your shell or `~/.secrets`:
 ```bash
 export OPENCODE_API_KEY_1="sk-opencode-account-1"
 export OPENCODE_API_KEY_2="sk-opencode-account-2"
-export COMMAMD_CODE_API_KEY="sk-command-code"   # optional: V4 Pro dedicated route
+export OPENCODE_API_KEY_3="sk-opencode-account-3"
+export COMMAMD_CODE_API_KEY="sk-command-code"
 ```
 
 ### 3. Run Gateway
@@ -168,7 +182,7 @@ llm:
 ## 🛠️ Management & Monitoring Endpoints
 
 * **Healthcheck**: `GET http://127.0.0.1:35001/healthz`
-* **Realtime Metrics & Active Key**: `GET http://127.0.0.1:35001/status`
+* **Realtime Metrics, Active Group & Key**: `GET http://127.0.0.1:35001/status`
 * **Manual Latch Toggle**: `POST http://127.0.0.1:35001/switch` or `POST http://127.0.0.1:35001/switch?index=1`
 
 ---
