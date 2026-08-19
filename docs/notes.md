@@ -78,3 +78,11 @@ than one route; Command Code is shared by Flash fallback and Pro routing.
 The outer priority latch advances only toward lower priorities. Once the final
 group is reached, a failed request returns 429 after visiting the route once;
 it does not immediately retry an already exhausted higher-priority group.
+
+### 13. Oracle ARM64 build target is pinned
+
+Oracle runs a Neoverse-N1 ARM64 host. A `bun-linux-arm64` standalone binary
+built with Bun 1.3.14 crashed in `Bun.serve` with `SIGBUS`, while a binary built
+targeting `bun-linux-arm64-v1.3.13` started successfully. The package script
+pins the ARM64 target to v1.3.13; do not replace it with the unversioned target
+without retesting on Oracle.
