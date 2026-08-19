@@ -40,6 +40,7 @@ bun run build:all        # 產生 dist/deepseek-gateway(-linux-x64/-linux-arm64)
 
 ```bash
 cp dist/deepseek-gateway ~/.local/bin/deepseek-gateway
+cp config.yaml routing.yaml ~/.config/deepseek-gateway/
 launchctl kickstart -k gui/$(id -u)/com.swear.deepseek-gateway
 sleep 2
 curl -s http://127.0.0.1:35001/healthz
@@ -60,6 +61,14 @@ scp dist/deepseek-gateway-linux-arm64 oracle:/tmp/gw-new
 
 ssh mazu   'mv /tmp/gw-new ~/.local/bin/deepseek-gateway'    # NFS 共享 → 四台同檔
 ssh oracle 'mv /tmp/gw-new ~/.local/bin/deepseek-gateway'
+
+# config.yaml and routing.yaml are provider/runtime and route config respectively.
+# On a shared NFS home, stage through /tmp and copy each once through mazu;
+# oracle is independent.
+scp config.yaml routing.yaml mazu:/tmp/
+ssh mazu 'mv /tmp/config.yaml /tmp/routing.yaml ~/.config/deepseek-gateway/'
+scp config.yaml routing.yaml oracle:/tmp/
+ssh oracle 'mv /tmp/config.yaml /tmp/routing.yaml ~/.config/deepseek-gateway/'
 ```
 
 ### 4.2 重啟（每台都要做）
@@ -85,8 +94,8 @@ done
 預期：五台的 md5 都是本地 `md5 -q dist/deepseek-gateway-linux-*` 的對應值，
 service `active`，healthz `status: ok`。
 
-> **重啟後 latch 歸零是正常現象**：`active_index` 回到 0（key 1），
-> 第一筆真實 429 會再翻到 key 2。不是 bug。
+> **重啟後 priority latch 歸零是正常現象**：Flash 先從 Priority 1 的
+> OpenCode Account 1 開始；同組 1/2/3 全部耗盡後才進入 Command Code。
 
 ---
 
@@ -102,6 +111,7 @@ dsh 的 key 解析：`settings.yaml` 的 `apiKeyEnv` → 先查 launch 環境變
 | `OPENCODE_API_KEY` | legacy 名稱，值 == `OPENCODE_API_KEY_1` |
 | `OPENCODE_API_KEY_1` | OpenCode Go 帳號 1（gateway key 1） |
 | `OPENCODE_API_KEY_2` | OpenCode Go 帳號 2（gateway key 2） |
+| `OPENCODE_API_KEY_3` | OpenCode Go 帳號 3（gateway key 3） |
 
 改 `apiKeyEnv` 名稱時，**每台機器的 `.credentials.yaml` 要一起改**，
 不要只改一邊。

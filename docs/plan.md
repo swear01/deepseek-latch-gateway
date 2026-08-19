@@ -1,21 +1,21 @@
 # DeepSeek Latch Gateway — Current Plan
 
-## Phase 1: MVP Core (Current Milestone)
-- [x] Initial project scaffolding with Bun + TypeScript.
-- [x] `agents_rule` setup and documentation.
-- [x] RS-Latch state machine with debounce & stats tracking (`src/latch.ts`).
-- [x] Transparent SSE reverse proxy with in-flight 429 retry (`src/proxy.ts`).
-- [x] YAML / JSON configuration loader with env variable interpolation (`src/config.ts`).
-- [x] Management endpoints (`GET /healthz`, `GET /status`, `POST /switch`) (`src/index.ts`).
-- [x] Comprehensive test suite for latch state transitions and proxy retries.
-- [x] CI workflow with automated test and standalone binary compile.
+## Phase 1: Routing implementation
+- [x] Provider/runtime configuration loader with environment interpolation.
+- [x] Independent `routing.yaml` loader and endpoint-reference validation.
+- [x] Hierarchical priority traversal with an inner latch per group.
+- [x] Flash route: OpenCode Go Accounts 1/2/3, then Command Code fallback.
+- [x] Pro route: shared Command Code provider with its namespaced upstream model.
+- [x] Proxy retry, compatibility bridges, and route-level model mapping.
+- [x] Unit and integration coverage for the three-key group and Priority 2 fallback.
 
-## Phase 2: Local Verification & Service Setup
-- [ ] Local testing on Mac (`swairM5`) with simulated 429 failovers.
-- [ ] Setup LaunchAgent `~/Library/LaunchAgents/com.swear.deepseek-gateway.plist`.
-- [ ] Connect local Pi Agent and DeepSeek Harness.
+## Phase 2: Local rollout
+- [ ] Install the updated binary and `routing.yaml` on the Mac gateway.
+- [ ] Verify `/healthz`, `/status`, Flash fallback, and Pro mapping.
 
-## Phase 3: Oracle & Fleet Rollout
-- [ ] Deploy to Oracle Cloud (`deepseek-gateway.service`) with memory cgroups.
-- [ ] Update `swear-review` configuration (`llm.url: http://127.0.0.1:35001/v1/chat/completions`).
-- [ ] Deploy to remaining Linux nodes in the HAPI fleet (`mazu`, `athena`, `valkyrie`, `cthulhu`, `zeus`).
+## Phase 3: Fleet rollout
+- [ ] Copy `OPENCODE_API_KEY_3` into each distinct fleet home secret file.
+- [ ] Install the updated binary and route config on the gateway hosts.
+- [ ] Restart and verify each gateway service independently.
+
+`swear-review` is not modified or deployed by this project.

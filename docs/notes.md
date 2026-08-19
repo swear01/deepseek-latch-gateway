@@ -2,9 +2,12 @@
 
 ## Key Design Rationale
 
-### 1. Why RS-Latch instead of Generic Round-Robin?
-Generic load balancers alternate requests between Key 1 and Key 2. When accounts have daily or hourly burst limits, alternating requests causes both accounts to hit rate limits simultaneously. 
-The RS-Latch stays on Key 1 until it fails, giving Key 2 maximum recovery/cooldown time before it is ever touched. Once Key 1 exhausts, Key 2 takes over 100% of the workload.
+### 1. Why hierarchical RS-Latch instead of a flat pool?
+Generic load balancers alternate requests between all keys. When accounts have
+usage limits, that can exhaust every account concurrently. The gateway keeps an
+inner RS-Latch for the highest-priority OpenCode group, so later accounts are
+untouched until the active account fails. Only when the whole group is
+exhausted does the outer route enter the lower-priority Command Code group.
 
 ### 2. Debounced Concurrency
 When a high-concurrency burst occurs (e.g. Swear Review OCR spawning multiple concurrent requests or DeepSeek Harness running batches), multiple requests may receive 429 at the exact same millisecond.
@@ -62,3 +65,16 @@ OpenCode Go answers quota exhaustion with a **429 JSON body**
 limit reached..."}}`, not SSE) — `isRateLimitOrQuotaError` matches status 429
 and `weekly usage limit` so the latch still flips. Key 1 was
 observed at weekly limit while key 2 stayed healthy.
+
+### 11. Provider and routing configuration are separate
+
+`config.yaml` defines provider endpoints and compatibility behavior. `routing.yaml`
+defines model routes, explicit numeric priorities, per-group latch membership,
+and route-level `upstream_model` names. A provider may be referenced by more
+than one route; Command Code is shared by Flash fallback and Pro routing.
+
+### 12. Priority exhaustion does not immediately fail back
+
+The outer priority latch advances only toward lower priorities. Once the final
+group is reached, a failed request returns 429 after visiting the route once;
+it does not immediately retry an already exhausted higher-priority group.
