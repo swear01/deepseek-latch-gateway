@@ -22,22 +22,38 @@ interface RouteState {
   route: ModelRouteConfig;
   activeGroupIndex: number;
   activeMemberIndexes: number[];
+  recoveryProbeOwner?: Set<string>;
+  recoveryFallbackGroupIndex?: number;
 }
+
+interface EndpointCircuit {
+  consecutiveFailures: number;
+  blockedUntil: number;
+}
+
+const QUOTA_COOLDOWN_MS = 90 * 60 * 1000;
+const MAX_QUOTA_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+const NETWORK_COOLDOWN_MS = 30 * 1000;
+const MAX_NETWORK_COOLDOWN_MS = 15 * 60 * 1000;
 
 export class PriorityLatchManager {
   private readonly endpoints: Map<string, EndpointConfig>;
   private readonly routes: Map<string, RouteState> = new Map();
   private readonly stats: Map<string, EndpointStats> = new Map();
-  private readonly startTime = Date.now();
+  private readonly circuits: Map<string, EndpointCircuit> = new Map();
+  private readonly now: () => number;
+  private readonly startTime: number;
   private lastSwitchTimestamp = 0;
   private totalSwitches = 0;
   private totalRequests = 0;
   private lastSwitchReason = "";
 
-  constructor(config: GatewayConfig) {
+  constructor(config: GatewayConfig, now: () => number = Date.now) {
     if (!config.routing) {
       throw new Error("Invalid configuration: priority routing requires a routing config.");
     }
+    this.now = now;
+    this.startTime = now();
     this.endpoints = new Map(config.endpoints.map((endpoint) => [endpoint.id, endpoint]));
     validateRoutingConfig(config.routing, this.endpoints.keys());
     for (const [model, route] of Object.entries(config.routing.routes)) {
@@ -48,6 +64,7 @@ export class PriorityLatchManager {
       });
     }
     for (const endpoint of config.endpoints) {
+      this.circuits.set(endpoint.id, { consecutiveFailures: 0, blockedUntil: 0 });
       this.stats.set(endpoint.id, {
         id: endpoint.id,
         name: endpoint.name,
@@ -75,12 +92,50 @@ export class PriorityLatchManager {
 
   public getAttempt(model: string, excluded: Set<string> = new Set()): PriorityRouteAttempt | undefined {
     const state = this.getState(model);
-    for (let groupIndex = state.activeGroupIndex; groupIndex < state.route.groups.length; groupIndex++) {
+    const now = this.now();
+    if (state.recoveryProbeOwner && state.recoveryProbeOwner !== excluded) {
+      return this.findAttempt(
+        model,
+        state,
+        state.recoveryFallbackGroupIndex!,
+        excluded,
+        now
+      );
+    }
+
+    if (!state.recoveryProbeOwner && state.activeGroupIndex > 0) {
+      const fallbackGroupIndex = state.activeGroupIndex;
+      const recovered = this.findAttempt(model, state, 0, excluded, now, fallbackGroupIndex, false);
+      if (recovered) {
+        state.recoveryProbeOwner = excluded;
+        state.recoveryFallbackGroupIndex = fallbackGroupIndex;
+        state.activeGroupIndex = recovered.groupIndex;
+        state.activeMemberIndexes[recovered.groupIndex] = recovered.memberIndex;
+        return recovered;
+      }
+    }
+
+    return this.findAttempt(model, state, state.activeGroupIndex, excluded, now);
+  }
+
+  private findAttempt(
+    model: string,
+    state: RouteState,
+    startGroupIndex: number,
+    excluded: Set<string>,
+    now: number,
+    endGroupIndex = state.route.groups.length,
+    useActiveMember = true
+  ): PriorityRouteAttempt | undefined {
+    for (let groupIndex = startGroupIndex; groupIndex < endGroupIndex; groupIndex++) {
       const group = state.route.groups[groupIndex];
-      const firstMember = groupIndex === state.activeGroupIndex ? state.activeMemberIndexes[groupIndex] : 0;
+      const firstMember = useActiveMember && groupIndex === startGroupIndex
+        ? state.activeMemberIndexes[groupIndex]
+        : 0;
       for (let memberIndex = firstMember; memberIndex < group.members.length; memberIndex++) {
         const attempt = this.createAttempt(model, state, groupIndex, memberIndex);
-        if (!excluded.has(attempt.key)) return attempt;
+        const circuit = this.circuits.get(attempt.endpoint.id)!;
+        if (!excluded.has(attempt.key) && circuit.blockedUntil <= now) return attempt;
       }
     }
     return undefined;
@@ -92,20 +147,54 @@ export class PriorityLatchManager {
     if (stat) stat.requests++;
   }
 
-  public recordSuccess(_model: string, attempt: PriorityRouteAttempt): void {
+  public recordSuccess(model: string, attempt: PriorityRouteAttempt): void {
     const stat = this.stats.get(attempt.endpoint.id);
     if (stat) {
       stat.successCount++;
-      stat.lastSuccessTime = new Date().toISOString();
+      stat.lastSuccessTime = new Date(this.now()).toISOString();
+    }
+    const circuit = this.circuits.get(attempt.endpoint.id);
+    if (circuit) {
+      circuit.consecutiveFailures = 0;
+      circuit.blockedUntil = 0;
+    }
+    const state = this.getState(model);
+    if (!state.recoveryProbeOwner || state.activeGroupIndex === attempt.groupIndex) {
+      state.activeGroupIndex = attempt.groupIndex;
+      state.activeMemberIndexes[attempt.groupIndex] = attempt.memberIndex;
+      state.recoveryProbeOwner = undefined;
+      state.recoveryFallbackGroupIndex = undefined;
     }
   }
 
-  public record429(_model: string, attempt: PriorityRouteAttempt): void {
+  public record429(_model: string, attempt: PriorityRouteAttempt, retryAfterMs?: number): void {
     const stat = this.stats.get(attempt.endpoint.id);
     if (stat) {
       stat.errors429++;
-      stat.last429Time = new Date().toISOString();
+      stat.last429Time = new Date(this.now()).toISOString();
     }
+    this.openCircuit(attempt.endpoint.id, QUOTA_COOLDOWN_MS, MAX_QUOTA_COOLDOWN_MS, retryAfterMs);
+  }
+
+  public recordNetworkFailure(_model: string, attempt: PriorityRouteAttempt): void {
+    this.openCircuit(attempt.endpoint.id, NETWORK_COOLDOWN_MS, MAX_NETWORK_COOLDOWN_MS);
+  }
+
+  public isRecoveryProbe(model: string, attempt: PriorityRouteAttempt): boolean {
+    const state = this.getState(model);
+    return Boolean(
+      state.recoveryProbeOwner &&
+      state.activeGroupIndex === attempt.groupIndex &&
+      state.activeMemberIndexes[attempt.groupIndex] === attempt.memberIndex
+    );
+  }
+
+  public finishRequest(model: string, owner: Set<string>): void {
+    const state = this.getState(model);
+    if (state.recoveryProbeOwner !== owner) return;
+    state.activeGroupIndex = state.recoveryFallbackGroupIndex!;
+    state.recoveryProbeOwner = undefined;
+    state.recoveryFallbackGroupIndex = undefined;
   }
 
   public advance(
@@ -133,6 +222,8 @@ export class PriorityLatchManager {
     if (nextGroup < state.route.groups.length) {
       state.activeGroupIndex = nextGroup;
       state.activeMemberIndexes[nextGroup] = 0;
+      state.recoveryProbeOwner = undefined;
+      state.recoveryFallbackGroupIndex = undefined;
       const next = state.route.groups[nextGroup];
       this.recordSwitch(attempt, next.members[0].endpointId, reason);
       return { switched: true, groupExhausted: true, routeExhausted: false };
@@ -176,7 +267,7 @@ export class PriorityLatchManager {
     const stat = this.stats.get(endpointId);
     if (stat) {
       stat.successCount++;
-      stat.lastSuccessTime = new Date().toISOString();
+      stat.lastSuccessTime = new Date(this.now()).toISOString();
     }
   }
 
@@ -184,7 +275,7 @@ export class PriorityLatchManager {
     const stat = this.stats.get(endpointId);
     if (stat) {
       stat.errors429++;
-      stat.last429Time = new Date().toISOString();
+      stat.last429Time = new Date(this.now()).toISOString();
     }
     this.lastSwitchReason = `${endpointId}: ${reason}`;
   }
@@ -200,7 +291,14 @@ export class PriorityLatchManager {
   }
 
   public advanceOnNetworkFailure(index: number, reason = "Network/Fetch failure") {
-    return this.trigger429(index, reason);
+    const attempt = this.getAttemptByFlatIndex(this.getDefaultModel(), index);
+    this.recordNetworkFailure(this.getDefaultModel(), attempt);
+    const result = this.advance(this.getDefaultModel(), attempt, reason);
+    return {
+      oldIndex: index,
+      newIndex: result.switched ? this.getActiveIndex() : index,
+      switched: result.switched,
+    };
   }
 
   public forceSwitch(targetIndex?: number): { oldIndex: number; newIndex: number } {
@@ -220,7 +318,13 @@ export class PriorityLatchManager {
     const target = flattened[newIndex];
     state.activeGroupIndex = target.groupIndex;
     state.activeMemberIndexes[target.groupIndex] = target.memberIndex;
-    this.lastSwitchTimestamp = Date.now();
+    state.recoveryProbeOwner = undefined;
+    state.recoveryFallbackGroupIndex = undefined;
+    const endpoint = this.createAttempt(model, state, target.groupIndex, target.memberIndex).endpoint;
+    const circuit = this.circuits.get(endpoint.id)!;
+    circuit.consecutiveFailures = 0;
+    circuit.blockedUntil = 0;
+    this.lastSwitchTimestamp = this.now();
     this.totalSwitches++;
     this.lastSwitchReason = `Manual switch to index ${newIndex} (${this.getActiveEndpoint().name})`;
     return { oldIndex, newIndex };
@@ -229,8 +333,19 @@ export class PriorityLatchManager {
   public getStatus(): GatewayStatus {
     const active = this.getActiveAttemptForDefault();
     const routeInfo = this.getActiveRouteInfo();
+    const halfOpenEndpoints = new Set<string>();
+    for (const [model, state] of this.routes) {
+      if (state.recoveryProbeOwner) {
+        halfOpenEndpoints.add(this.createAttempt(
+          model,
+          state,
+          state.activeGroupIndex,
+          state.activeMemberIndexes[state.activeGroupIndex]
+        ).endpoint.id);
+      }
+    }
     return {
-      uptimeSeconds: Math.floor((Date.now() - this.startTime) / 1000),
+      uptimeSeconds: Math.floor((this.now() - this.startTime) / 1000),
       activeIndex: active.memberIndex,
       activeEndpoint: {
         id: active.endpoint.id,
@@ -243,7 +358,17 @@ export class PriorityLatchManager {
       totalSwitches: this.totalSwitches,
       lastSwitchTime: this.lastSwitchTimestamp > 0 ? new Date(this.lastSwitchTimestamp).toISOString() : undefined,
       lastSwitchReason: this.lastSwitchReason || undefined,
-      endpoints: Array.from(this.stats.values()),
+      endpoints: Array.from(this.stats.values()).map((stat) => {
+        const circuit = this.circuits.get(stat.id)!;
+        return {
+          ...stat,
+          circuitState: halfOpenEndpoints.has(stat.id)
+            ? "half-open"
+            : circuit.consecutiveFailures > 0 ? "open" : "closed",
+          consecutiveFailures: circuit.consecutiveFailures,
+          blockedUntil: circuit.blockedUntil > 0 ? new Date(circuit.blockedUntil).toISOString() : undefined,
+        };
+      }),
     };
   }
 
@@ -286,6 +411,24 @@ export class PriorityLatchManager {
     );
   }
 
+  private openCircuit(
+    endpointId: string,
+    baseCooldownMs: number,
+    maxCooldownMs: number,
+    retryAfterMs?: number
+  ): void {
+    const circuit = this.circuits.get(endpointId);
+    if (!circuit) return;
+    const now = this.now();
+    if (circuit.blockedUntil > now) return;
+    circuit.consecutiveFailures++;
+    const exponentialCooldown = Math.min(
+      baseCooldownMs * 2 ** (circuit.consecutiveFailures - 1),
+      maxCooldownMs
+    );
+    circuit.blockedUntil = now + (retryAfterMs ?? exponentialCooldown);
+  }
+
   private getAttemptByFlatIndex(model: string, index: number): PriorityRouteAttempt {
     const state = this.getState(model);
     const members = state.route.groups.flatMap((group, groupIndex) =>
@@ -297,7 +440,7 @@ export class PriorityLatchManager {
   }
 
   private recordSwitch(attempt: PriorityRouteAttempt, nextEndpointId: string, reason: string): void {
-    this.lastSwitchTimestamp = Date.now();
+    this.lastSwitchTimestamp = this.now();
     this.totalSwitches++;
     const nextEndpoint = this.endpoints.get(nextEndpointId);
     this.lastSwitchReason = `Switched from ${attempt.endpoint.name} to ${nextEndpoint?.name || nextEndpointId} due to: ${reason}`;

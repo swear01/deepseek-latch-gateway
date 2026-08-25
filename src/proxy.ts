@@ -36,6 +36,15 @@ function isRateLimitOrQuotaError(status: number, bodyText: string): boolean {
   return false;
 }
 
+function retryAfterMs(value: string | null): number | undefined {
+  if (!value) return undefined;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+  const timestamp = Date.parse(value);
+  if (Number.isNaN(timestamp)) return undefined;
+  return Math.max(0, timestamp - Date.now());
+}
+
 function parseRequestBody(bodyText: string): { json: Record<string, unknown>; model?: string } | null {
   if (!bodyText) return null;
   try {
@@ -389,7 +398,7 @@ async function handlePriorityProxyRequest(ctx: {
           networkError = "";
           rejected.add(attempt.key);
           quotaRejected.add(attempt.key);
-          latch.record429(model, attempt);
+          latch.record429(model, attempt, retryAfterMs(upstreamRes.headers.get("retry-after")));
           latch.advance(model, attempt, `Status ${upstreamRes.status}: ${errText.slice(0, 100)}`);
           break;
         }
@@ -400,13 +409,21 @@ async function handlePriorityProxyRequest(ctx: {
             networkError = "";
             rejected.add(attempt.key);
             quotaRejected.add(attempt.key);
-            latch.record429(model, attempt);
+            latch.record429(model, attempt, retryAfterMs(upstreamRes.headers.get("retry-after")));
             latch.advance(model, attempt, errBody.slice(0, 100));
+            break;
+          }
+          if (latch.isRecoveryProbe(model, attempt)) {
+            networkError = "";
+            rejected.add(attempt.key);
+            latch.recordNetworkFailure(model, attempt);
+            latch.advance(model, attempt, `Status ${upstreamRes.status}: ${errBody.slice(0, 100)}`);
             break;
           }
         }
 
         if (upstreamRes.ok) latch.recordSuccess(model, attempt);
+        latch.finishRequest(model, rejected);
         return await forwardUpstreamResponse(upstreamRes, endpoint, fetchCalls);
       } catch (err: unknown) {
         networkError = (err as Error)?.message || String(err);
@@ -417,16 +434,19 @@ async function handlePriorityProxyRequest(ctx: {
     if (networkError) {
       rejected.add(attempt.key);
       networkFailures.push(`${endpoint.id}: ${networkError}`);
+      latch.recordNetworkFailure(model, attempt);
       latch.advance(model, attempt, networkError);
     }
     attempts++;
 
     if (attempts >= maxAttempts && networkError && quotaRejected.size === 0) {
       console.error(`[Upstream Unreachable] ${networkFailures.join("; ")}`);
+      latch.finishRequest(model, rejected);
       return unreachableResponse("all attempted upstream endpoints unreachable");
     }
   }
 
+  latch.finishRequest(model, rejected);
   return new Response(
     JSON.stringify({
       error: {

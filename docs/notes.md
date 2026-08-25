@@ -73,11 +73,15 @@ defines model routes, explicit numeric priorities, per-group latch membership,
 and route-level `upstream_model` names. A provider may be referenced by more
 than one route; Command Code is shared by Flash fallback and Pro routing.
 
-### 12. Priority exhaustion does not immediately fail back
+### 12. Priority recovery uses a half-open circuit breaker
 
-The outer priority latch advances only toward lower priorities. Once the final
-group is reached, a failed request returns 429 after visiting the route once;
-it does not immediately retry an already exhausted higher-priority group.
+Quota failures block each endpoint independently for 1.5 hours, then 3, 6, 12,
+and at most 24 hours after repeated failed probes. A valid upstream
+`Retry-After` overrides that calculated delay. After expiry, the next real
+request owns one half-open recovery probe; concurrent requests keep using the
+fallback. Success immediately restores the higher-priority group, while
+failure completes through the fallback and starts the next cooldown. Network
+failures use the same mechanism with a 30-second base and 15-minute cap.
 
 ### 13. Oracle ARM64 build target is pinned
 

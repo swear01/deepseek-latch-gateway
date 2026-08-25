@@ -103,14 +103,17 @@ describe("PriorityLatchManager", () => {
     expect(first?.endpoint.id).toBe("opencode-go-1");
     expect(first?.groupPriority).toBe(1);
 
+    manager.record429("deepseek-v4-flash", first!);
     manager.advance("deepseek-v4-flash", first!, "429");
     expect(manager.getAttempt("deepseek-v4-flash")?.endpoint.id).toBe("opencode-go-2");
 
     const second = manager.getAttempt("deepseek-v4-flash");
+    manager.record429("deepseek-v4-flash", second!);
     manager.advance("deepseek-v4-flash", second!, "429");
     expect(manager.getAttempt("deepseek-v4-flash")?.endpoint.id).toBe("opencode-go-3");
 
     const third = manager.getAttempt("deepseek-v4-flash");
+    manager.record429("deepseek-v4-flash", third!);
     manager.advance("deepseek-v4-flash", third!, "429");
     const fallback = manager.getAttempt("deepseek-v4-flash");
     expect(fallback?.endpoint.id).toBe("command-code");
@@ -119,5 +122,81 @@ describe("PriorityLatchManager", () => {
 
     manager.recordSuccess("deepseek-v4-flash", fallback!);
     expect(manager.getAttempt("deepseek-v4-flash")?.endpoint.id).toBe("command-code");
+  });
+
+  it("half-opens the higher-priority group after 1.5 hours for one request", () => {
+    let now = 0;
+    const manager = new PriorityLatchManager(createConfig(), () => now);
+    const model = "deepseek-v4-flash";
+
+    for (let index = 0; index < 3; index++) {
+      const attempt = manager.getAttempt(model);
+      manager.record429(model, attempt!);
+      manager.advance(model, attempt!, "429");
+    }
+
+    now = 90 * 60 * 1000 - 1;
+    expect(manager.getAttempt(model)?.endpoint.id).toBe("command-code");
+
+    now++;
+    const probeRequest = new Set<string>();
+    expect(manager.getAttempt(model, probeRequest)?.endpoint.id).toBe("opencode-go-1");
+    expect(manager.getAttempt(model, new Set())?.endpoint.id).toBe("command-code");
+    expect(manager.getStatus().endpoints.find((endpoint) => endpoint.id === "opencode-go-1")).toMatchObject({
+      circuitState: "half-open",
+      consecutiveFailures: 1,
+      blockedUntil: "1970-01-01T01:30:00.000Z",
+    });
+
+    const probe = manager.getAttempt(model, probeRequest);
+    manager.recordSuccess(model, probe!);
+    expect(manager.getAttempt(model)?.endpoint.id).toBe("opencode-go-1");
+    expect(manager.getStatus().endpoints.find((endpoint) => endpoint.id === "opencode-go-1")).toMatchObject({
+      circuitState: "closed",
+      consecutiveFailures: 0,
+      blockedUntil: undefined,
+    });
+  });
+
+  it("doubles the cooldown after a failed half-open recovery", () => {
+    let now = 0;
+    const manager = new PriorityLatchManager(createConfig(), () => now);
+    const model = "deepseek-v4-flash";
+
+    for (let index = 0; index < 3; index++) {
+      const attempt = manager.getAttempt(model);
+      manager.record429(model, attempt!);
+      manager.advance(model, attempt!, "429");
+    }
+
+    now = 90 * 60 * 1000;
+    const probeRequest = new Set<string>();
+    for (let index = 0; index < 3; index++) {
+      const attempt = manager.getAttempt(model, probeRequest);
+      manager.record429(model, attempt!);
+      manager.advance(model, attempt!, "429");
+    }
+
+    now += 3 * 60 * 60 * 1000 - 1;
+    expect(manager.getAttempt(model)?.endpoint.id).toBe("command-code");
+    now++;
+    expect(manager.getAttempt(model, new Set())?.endpoint.id).toBe("opencode-go-1");
+  });
+
+  it("clears the selected endpoint circuit on a manual switch", () => {
+    const manager = new PriorityLatchManager(createConfig());
+    const model = "deepseek-v4-flash";
+
+    const first = manager.getAttempt(model)!;
+    manager.record429(model, first);
+    manager.advance(model, first, "429");
+    manager.forceSwitch(0);
+
+    expect(manager.getAttempt(model)?.endpoint.id).toBe("opencode-go-1");
+    expect(manager.getStatus().endpoints.find((endpoint) => endpoint.id === "opencode-go-1")).toMatchObject({
+      circuitState: "closed",
+      consecutiveFailures: 0,
+      blockedUntil: undefined,
+    });
   });
 });

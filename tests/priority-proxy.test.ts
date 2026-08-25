@@ -9,21 +9,32 @@ let openCode3: ReturnType<typeof Bun.serve>;
 let commandCode: ReturnType<typeof Bun.serve>;
 let commandHits = 0;
 let commandModel = "";
+let openCode1Status = 429;
 
-function quotaServer(port: number): ReturnType<typeof Bun.serve> {
+function quotaServer(
+  port: number,
+  retryAfter?: string,
+  status: () => number = () => 429
+): ReturnType<typeof Bun.serve> {
   return Bun.serve({
     port,
     fetch() {
+      const responseStatus = status();
       return Response.json(
-        { error: { message: "weekly usage limit", type: "insufficient_quota" } },
-        { status: 429 }
+        responseStatus === 429
+          ? { error: { message: "weekly usage limit", type: "insufficient_quota" } }
+          : { error: { message: "internal failure", type: "server_error" } },
+        {
+          status: responseStatus,
+          headers: responseStatus === 429 && retryAfter ? { "Retry-After": retryAfter } : undefined,
+        }
       );
     },
   });
 }
 
 beforeAll(() => {
-  openCode1 = quotaServer(19101);
+  openCode1 = quotaServer(19101, "7200", () => openCode1Status);
   openCode2 = quotaServer(19102);
   openCode3 = quotaServer(19103);
   commandCode = Bun.serve({
@@ -118,7 +129,7 @@ function postChat(manager: PriorityLatchManager, config: GatewayConfig) {
 }
 
 describe("hierarchical priority routing", () => {
-  it("tries all three OpenCode keys before Command Code and keeps the fallback latched", async () => {
+  it("tries all three OpenCode keys before Command Code and keeps fallback during cooldown", async () => {
     const config = createConfig();
     const manager = new PriorityLatchManager(config);
 
@@ -129,11 +140,47 @@ describe("hierarchical priority routing", () => {
     expect(response.headers.get("X-Gateway-Attempt")).toBe("4");
     expect(commandModel).toBe("deepseek/deepseek-v4-flash");
 
+    const key1 = manager.getStatus().endpoints.find((endpoint) => endpoint.id === "opencode-go-1")!;
+    const retryAfter = Date.parse(key1.blockedUntil!) - Date.now();
+    expect(retryAfter).toBeGreaterThan(7_199_000);
+    expect(retryAfter).toBeLessThanOrEqual(7_200_000);
+
     const hitsBefore = commandHits;
     const secondResponse = await postChat(manager, config);
     expect(secondResponse.status).toBe(200);
     expect(secondResponse.headers.get("X-Gateway-Attempt")).toBe("1");
     expect(commandHits).toBe(hitsBefore + 1);
     expect(manager.getAttempt("deepseek-v4-flash")?.endpoint.id).toBe("command-code");
+  });
+
+  it("keeps a failed half-open probe transparent by continuing to fallback", async () => {
+    let now = 0;
+    const config = createConfig();
+    const manager = new PriorityLatchManager(config, () => now);
+
+    expect((await postChat(manager, config)).status).toBe(200);
+    now = 2 * 60 * 60 * 1000;
+    openCode1Status = 500;
+    try {
+      const response = await postChat(manager, config);
+      expect(response.status).toBe(200);
+      expect(response.headers.get("X-Gateway-Active-Endpoint")).toBe("command-code");
+      expect(manager.getStatus().endpoints.some((endpoint) => endpoint.circuitState === "half-open")).toBe(false);
+    } finally {
+      openCode1Status = 429;
+    }
+  });
+
+  it("releases a half-open probe when the request attempt budget ends", async () => {
+    let now = 0;
+    const config = createConfig();
+    const manager = new PriorityLatchManager(config, () => now);
+
+    expect((await postChat(manager, config)).status).toBe(200);
+    now = 2 * 60 * 60 * 1000;
+    config.strategy.maxRetriesPerRequest = 1;
+    expect((await postChat(manager, config)).status).toBe(429);
+    expect(manager.getStatus()).toMatchObject({ activePriority: 2, activeGroup: "command-code-fallback" });
+    expect(manager.getStatus().endpoints.some((endpoint) => endpoint.circuitState === "half-open")).toBe(false);
   });
 });

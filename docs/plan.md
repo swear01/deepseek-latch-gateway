@@ -8,6 +8,7 @@
 - [x] Pro route: shared Command Code provider with its namespaced upstream model.
 - [x] Proxy retry, compatibility bridges, and route-level model mapping.
 - [x] Unit and integration coverage for the three-key group and Priority 2 fallback.
+- [x] Timed half-open recovery to the highest available priority with one probe owner.
 
 ## Phase 2: Local rollout
 - [ ] Install the updated binary and `routing.yaml` on the Mac gateway.
