@@ -426,7 +426,7 @@ export class PriorityLatchManager {
       baseCooldownMs * 2 ** (circuit.consecutiveFailures - 1),
       maxCooldownMs
     );
-    circuit.blockedUntil = now + (retryAfterMs ?? exponentialCooldown);
+    circuit.blockedUntil = now + Math.min(retryAfterMs ?? exponentialCooldown, exponentialCooldown);
   }
 
   private getAttemptByFlatIndex(model: string, index: number): PriorityRouteAttempt {

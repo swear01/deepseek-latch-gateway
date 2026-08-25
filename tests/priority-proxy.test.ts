@@ -141,9 +141,9 @@ describe("hierarchical priority routing", () => {
     expect(commandModel).toBe("deepseek/deepseek-v4-flash");
 
     const key1 = manager.getStatus().endpoints.find((endpoint) => endpoint.id === "opencode-go-1")!;
-    const retryAfter = Date.parse(key1.blockedUntil!) - Date.now();
-    expect(retryAfter).toBeGreaterThan(7_199_000);
-    expect(retryAfter).toBeLessThanOrEqual(7_200_000);
+    const cooldown = Date.parse(key1.blockedUntil!) - Date.now();
+    expect(cooldown).toBeGreaterThan(5_399_000);
+    expect(cooldown).toBeLessThanOrEqual(5_400_000);
 
     const hitsBefore = commandHits;
     const secondResponse = await postChat(manager, config);

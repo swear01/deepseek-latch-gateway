@@ -76,8 +76,10 @@ than one route; Command Code is shared by Flash fallback and Pro routing.
 ### 12. Priority recovery uses a half-open circuit breaker
 
 Quota failures block each endpoint independently for 1.5 hours, then 3, 6, 12,
-and at most 24 hours after repeated failed probes. A valid upstream
-`Retry-After` overrides that calculated delay. After expiry, the next real
+and at most 24 hours after repeated failed probes. A shorter upstream
+`Retry-After` accelerates that calculated delay but never extends it. OpenCode
+can emit retry delays lasting weeks, which would otherwise defeat periodic
+recovery probes. After expiry, the next real
 request owns one half-open recovery probe; concurrent requests keep using the
 fallback. Success immediately restores the higher-priority group, while
 failure completes through the fallback and starts the next cooldown. Network

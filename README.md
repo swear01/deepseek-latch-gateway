@@ -28,7 +28,7 @@ Priority 2: Command Code latch
 
 - `max_retries_per_request` bounds endpoint attempts across the selected route. Each endpoint attempt includes one same-endpoint retry for transient network failures.
 - A definitive quota response advances the current group; two network failures skip that endpoint for the current request without counting as a 429.
-- Quota cooldown starts at 1.5 hours and doubles to 3, 6, 12, then at most 24 hours; a valid upstream `Retry-After` takes precedence.
+- Quota cooldown starts at 1.5 hours and doubles to 3, 6, 12, then at most 24 hours; a shorter upstream `Retry-After` can accelerate recovery but never extend that schedule.
 - While a recovery probe is in flight, concurrent requests continue on the fallback. A successful probe immediately restores the higher-priority route.
 - `X-Gateway-Attempt` reports cumulative upstream fetch calls, including same-endpoint retries.
 - `/status` reports each endpoint's `circuitState`, `consecutiveFailures`, and `blockedUntil`.
