@@ -93,3 +93,11 @@ Bun closes an otherwise healthy streaming response after 10 seconds without a
 chunk unless `Bun.serve` receives `idleTimeout`. The gateway passes
 `server.timeout_seconds` to that setting so a quiet upstream stream can remain
 open for the same duration as the upstream request timeout.
+
+### 15. Replace the running standalone binary atomically
+
+Never use `cp` or `install` directly onto `~/.local/bin/deepseek-gateway` while
+the service is running. Truncating the mapped executable can trigger SIGBUS and
+an auto-restart may execute the partially written file. Stage the complete
+binary in `/tmp`, set its mode, then use `mv` to replace the path atomically
+before restarting the service.
