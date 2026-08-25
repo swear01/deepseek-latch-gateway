@@ -76,6 +76,9 @@ export interface EndpointStats {
   errors429: number;
   last429Time?: string;
   lastSuccessTime?: string;
+  circuitState?: "closed" | "open" | "half-open";
+  consecutiveFailures?: number;
+  blockedUntil?: string;
 }
 
 export interface GatewayStatus {

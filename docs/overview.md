@@ -10,6 +10,7 @@ Routing is hierarchical rather than a flat endpoint list:
 - Priority 1 is an RS-Latch group containing the OpenCode Go accounts.
 - Priority 2 is the Command Code fallback group.
 - A group is exhausted before the outer route advances to the next priority.
+- Exhausted endpoints are retried through a single half-open probe after their cooldown, restoring the highest available priority on success.
 - Route-specific upstream model names are kept in `routing.yaml`.
 - Provider URLs, credentials, and compatibility behavior remain in `config.yaml`.
 

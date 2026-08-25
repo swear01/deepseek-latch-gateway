@@ -96,6 +96,8 @@ service `active`，healthz `status: ok`。
 
 > **重啟後 priority latch 歸零是正常現象**：Flash 先從 Priority 1 的
 > OpenCode Account 1 開始；同組 1/2/3 全部耗盡後才進入 Command Code。
+> Quota cooldown 由 1.5 小時開始；到期後下一筆真實請求會單獨探測
+> Priority 1，成功即自動恢復，其他同時請求仍走 Command Code。
 
 ---
 
