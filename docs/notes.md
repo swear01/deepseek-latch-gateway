@@ -86,3 +86,10 @@ built with Bun 1.3.14 crashed in `Bun.serve` with `SIGBUS`, while a binary built
 targeting `bun-linux-arm64-v1.3.13` started successfully. The package script
 pins the ARM64 target to v1.3.13; do not replace it with the unversioned target
 without retesting on Oracle.
+
+### 14. The configured timeout also governs downstream idle connections
+
+Bun closes an otherwise healthy streaming response after 10 seconds without a
+chunk unless `Bun.serve` receives `idleTimeout`. The gateway passes
+`server.timeout_seconds` to that setting so a quiet upstream stream can remain
+open for the same duration as the upstream request timeout.

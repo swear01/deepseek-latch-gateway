@@ -10,6 +10,7 @@ const latch = config.routing ? new PriorityLatchManager(config) : new RSLatchMan
 const server = Bun.serve({
   hostname: config.server.host,
   port: config.server.port,
+  idleTimeout: config.server.timeoutSeconds,
   async fetch(req) {
     const url = new URL(req.url);
     const pathname = url.pathname;
