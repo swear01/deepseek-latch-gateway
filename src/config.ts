@@ -1,6 +1,8 @@
 import { readFileSync, existsSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import type { GatewayConfig, EndpointConfig } from "./types";
+import { loadRoutingConfig, validateRoutingConfig } from "./routing";
 
 function interpolateEnv(str?: string): string {
   if (!str) return "";
@@ -98,6 +100,7 @@ export function loadConfig(configPath?: string): GatewayConfig {
     console.log(`[Config] No config file found at ${targetPath}, checking environment variables...`);
     const key1 = process.env.OPENCODE_API_KEY_1 || "";
     const key2 = process.env.OPENCODE_API_KEY_2 || "";
+    const key3 = process.env.OPENCODE_API_KEY_3 || "";
 
     const endpoints: EndpointConfig[] = [];
     if (key1) {
@@ -114,6 +117,14 @@ export function loadConfig(configPath?: string): GatewayConfig {
         name: "OpenCode Go (Account 2)",
         baseUrl: process.env.OPENCODE_BASE_URL || "https://opencode.ai/zen/go/v1",
         apiKey: key2,
+      });
+    }
+    if (key3) {
+      endpoints.push({
+        id: "opencode-go-3",
+        name: "OpenCode Go (Account 3)",
+        baseUrl: process.env.OPENCODE_BASE_URL || "https://opencode.ai/zen/go/v1",
+        apiKey: key3,
       });
     }
 
@@ -145,6 +156,10 @@ export function loadConfig(configPath?: string): GatewayConfig {
     throw new Error("Invalid configuration: 'endpoints' array must contain at least one endpoint.");
   }
 
+  const routingPath = process.env.GATEWAY_ROUTING || join(dirname(targetPath), "routing.yaml");
+  const routing = existsSync(routingPath) ? loadRoutingConfig(routingPath) : undefined;
+  if (routing) validateRoutingConfig(routing, endpoints.map((endpoint) => endpoint.id));
+
   const config: GatewayConfig = {
     server: {
       host: parsed.server?.host || "127.0.0.1",
@@ -160,6 +175,7 @@ export function loadConfig(configPath?: string): GatewayConfig {
         endpoints.length,
     },
     endpoints,
+    routing,
     models: parsed.models || { aliases: {} },
   };
 

@@ -78,4 +78,53 @@ models:
       unwrapError: false,
     });
   });
+
+  it("loads routing from the config directory and keeps provider settings separate", () => {
+    const dir = mkdtempSync(join(tmpdir(), "gw-config-with-routing-"));
+    const configPath = join(dir, "config.yaml");
+    writeFileSync(
+      configPath,
+      `
+server:
+  port: 35001
+strategy:
+  mode: latch
+endpoints:
+  - id: opencode-go-1
+    api_key: key-1
+  - id: opencode-go-2
+    api_key: key-2
+  - id: opencode-go-3
+    api_key: key-3
+  - id: command-code
+    api_key: command-key
+`
+    );
+    writeFileSync(
+      join(dir, "routing.yaml"),
+      `
+routes:
+  deepseek-v4-flash:
+    priority_groups:
+      - id: opencode-go
+        priority: 1
+        mode: latch
+        members:
+          - endpoint: opencode-go-1
+          - endpoint: opencode-go-2
+          - endpoint: opencode-go-3
+      - id: command-code
+        priority: 2
+        mode: latch
+        members:
+          - endpoint: command-code
+            upstream_model: deepseek/deepseek-v4-flash
+`
+    );
+
+    const config = loadConfig(configPath);
+    expect(config.routing?.routes["deepseek-v4-flash"].groups.map((group) => group.priority)).toEqual([1, 2]);
+    expect(config.endpoints.find((endpoint) => endpoint.id === "command-code")?.models).toBeUndefined();
+    expect(config.endpoints.find((endpoint) => endpoint.id === "command-code")?.modelMap).toBeUndefined();
+  });
 });

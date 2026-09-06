@@ -27,6 +27,27 @@ export interface EndpointConfig {
   extraHeaders?: Record<string, string>;
 }
 
+export interface RouteMemberConfig {
+  endpointId: string;
+  upstreamModel?: string;
+}
+
+export interface RouteGroupConfig {
+  id: string;
+  priority: number;
+  mode: "latch";
+  members: RouteMemberConfig[];
+}
+
+export interface ModelRouteConfig {
+  mode: "priority-latch";
+  groups: RouteGroupConfig[];
+}
+
+export interface RoutingConfig {
+  routes: Record<string, ModelRouteConfig>;
+}
+
 export interface GatewayConfig {
   server: {
     host: string;
@@ -39,6 +60,7 @@ export interface GatewayConfig {
     maxRetriesPerRequest: number;
   };
   endpoints: EndpointConfig[];
+  routing?: RoutingConfig;
   models?: {
     aliases?: Record<string, string>;
     /** If set, requests whose model is not in this list are rejected (400). */
@@ -54,6 +76,9 @@ export interface EndpointStats {
   errors429: number;
   last429Time?: string;
   lastSuccessTime?: string;
+  circuitState?: "closed" | "open" | "half-open";
+  consecutiveFailures?: number;
+  blockedUntil?: string;
 }
 
 export interface GatewayStatus {
@@ -64,6 +89,8 @@ export interface GatewayStatus {
     name: string;
     baseUrl: string;
   };
+  activePriority?: number;
+  activeGroup?: string;
   totalRequests: number;
   totalSwitches: number;
   lastSwitchTime?: string;

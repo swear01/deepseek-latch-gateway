@@ -11,7 +11,7 @@
     "typecheck": "tsc --noEmit",
     "build": "bun build --compile --minify --outfile=dist/deepseek-gateway src/index.ts",
     "build:linux-x64": "bun build --compile --minify --target=bun-linux-x64 --outfile=dist/deepseek-gateway-linux-x64 src/index.ts",
-    "build:linux-arm64": "bun build --compile --minify --target=bun-linux-arm64 --outfile=dist/deepseek-gateway-linux-arm64 src/index.ts",
+    "build:linux-arm64": "bun build --compile --minify --target=bun-linux-arm64-v1.3.13 --outfile=dist/deepseek-gateway-linux-arm64 src/index.ts",
     "build:all": "bun run build && bun run build:linux-x64 && bun run build:linux-arm64"
   },
   "keywords": [
