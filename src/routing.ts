@@ -37,7 +37,7 @@ function parseMember(raw: RawRouteMember, routeModel: string, groupId: string, i
   }
   const upstreamModel = raw.upstreamModel ?? raw.upstream_model;
   if (upstreamModel !== undefined && (typeof upstreamModel !== "string" || !upstreamModel.trim())) {
-    throw new Error(`Invalid routing: route '${routeModel}' member upstream_model must be a non-empty string.`);
+    throw new Error(`Invalid routing: route '${routeModel}' member upstreamModel/upstream_model must be a non-empty string.`);
   }
   return {
     endpointId: endpointId.trim(),
@@ -52,7 +52,7 @@ function parseGroup(raw: RawRouteGroup, routeModel: string, index: number): Rout
   if (raw.id !== undefined && (typeof raw.id !== "string" || !raw.id.trim())) {
     throw new Error(`Invalid routing: route '${routeModel}' group ${index + 1} id must be a non-empty string.`);
   }
-  const id = raw.id?.trim() || `priority-${index + 1}`;
+  const id = raw.id?.trim() || `priority-${raw.priority}`;
   if (raw.priority === undefined || !Number.isInteger(raw.priority) || raw.priority < 1) {
     throw new Error(`Invalid routing: route '${routeModel}' group '${id}' needs a positive integer priority.`);
   }

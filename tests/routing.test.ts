@@ -78,6 +78,13 @@ describe("routing config", () => {
     }
   });
 
+  it("derives default group IDs from priority regardless of declaration order", () => {
+    const routing = loadRoutingConfig(writeTempRouting(JSON.stringify({ routes: { flash: {
+      priority_groups: [2, 1].map(priority => ({ priority, members: [{ endpoint: "go" }] })),
+    } } })));
+    expect(routing.routes.flash.groups.map(group => group.id)).toEqual(["priority-1", "priority-2"]);
+  });
+
   it("normalizes member names and group IDs", () => {
     const routing = loadRoutingConfig(writeTempRouting(JSON.stringify({ routes: { flash: {
       priority_groups: [{ id: " go ", priority: 1, members: [{ endpoint: " key ", upstream_model: " model " }] }],
