@@ -12,6 +12,32 @@ function writeTempConfig(yaml: string): string {
 }
 
 describe("Config compat parsing", () => {
+  it("rejects an explicitly configured missing routing file", () => {
+    const previous = process.env.GATEWAY_ROUTING;
+    process.env.GATEWAY_ROUTING = join(mkdtempSync(join(tmpdir(), "gw-missing-routing-")), "absent.yaml");
+    try {
+      expect(() => loadConfig()).toThrow("Routing config not found");
+    } finally {
+      if (previous === undefined) delete process.env.GATEWAY_ROUTING;
+      else process.env.GATEWAY_ROUTING = previous;
+    }
+  });
+
+  it("loads routing with env-only endpoints", () => {
+    const dir = mkdtempSync(join(tmpdir(), "gw-env-routing-"));
+    writeFileSync(join(dir, "routing.yaml"), JSON.stringify({ routes: { flash: {
+      priority_groups: [{ priority: 1, members: [{ endpoint: "opencode-go-1" }] }],
+    } } }));
+    const previous = process.env.OPENCODE_API_KEY_1;
+    process.env.OPENCODE_API_KEY_1 = "test-key";
+    try {
+      expect(loadConfig(join(dir, "missing.yaml")).routing?.routes.flash.groups[0].members[0].endpointId).toBe("opencode-go-1");
+    } finally {
+      if (previous === undefined) delete process.env.OPENCODE_API_KEY_1;
+      else process.env.OPENCODE_API_KEY_1 = previous;
+    }
+  });
+
   it("parses snake_case compat keys into the camelCase EndpointCompat shape", () => {
     const path = writeTempConfig(`
 server:
@@ -77,5 +103,54 @@ models:
       responseReasoningField: "thinking",
       unwrapError: false,
     });
+  });
+
+  it("loads routing from the config directory and keeps provider settings separate", () => {
+    const dir = mkdtempSync(join(tmpdir(), "gw-config-with-routing-"));
+    const configPath = join(dir, "config.yaml");
+    writeFileSync(
+      configPath,
+      `
+server:
+  port: 35001
+strategy:
+  mode: latch
+endpoints:
+  - id: opencode-go-1
+    api_key: key-1
+  - id: opencode-go-2
+    api_key: key-2
+  - id: opencode-go-3
+    api_key: key-3
+  - id: command-code
+    api_key: command-key
+`
+    );
+    writeFileSync(
+      join(dir, "routing.yaml"),
+      `
+routes:
+  deepseek-v4-flash:
+    priority_groups:
+      - id: opencode-go
+        priority: 1
+        mode: latch
+        members:
+          - endpoint: opencode-go-1
+          - endpoint: opencode-go-2
+          - endpoint: opencode-go-3
+      - id: command-code
+        priority: 2
+        mode: latch
+        members:
+          - endpoint: command-code
+            upstream_model: deepseek/deepseek-v4-flash
+`
+    );
+
+    const config = loadConfig(configPath);
+    expect(config.routing?.routes["deepseek-v4-flash"].groups.map((group) => group.priority)).toEqual([1, 2]);
+    expect(config.endpoints.find((endpoint) => endpoint.id === "command-code")?.models).toBeUndefined();
+    expect(config.endpoints.find((endpoint) => endpoint.id === "command-code")?.modelMap).toBeUndefined();
   });
 });

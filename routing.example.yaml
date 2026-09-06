@@ -1,0 +1,28 @@
+routes:
+  deepseek-v4-flash:
+    mode: "priority-latch"
+    priority_groups:
+      - id: "opencode-go"
+        priority: 1
+        mode: "latch"
+        members:
+          - endpoint: "opencode-go-1"
+          - endpoint: "opencode-go-2"
+          - endpoint: "opencode-go-3"
+
+      - id: "command-code-fallback"
+        priority: 2
+        mode: "latch"
+        members:
+          - endpoint: "command-code"
+            upstream_model: "deepseek/deepseek-v4-flash"
+
+  deepseek-v4-pro:
+    mode: "priority-latch"
+    priority_groups:
+      - id: "command-code-pro"
+        priority: 1
+        mode: "latch"
+        members:
+          - endpoint: "command-code"
+            upstream_model: "deepseek/deepseek-v4-pro"

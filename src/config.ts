@@ -1,6 +1,8 @@
 import { readFileSync, existsSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import type { GatewayConfig, EndpointConfig } from "./types";
+import { loadRoutingConfig, validateRoutingConfig } from "./routing";
 
 function interpolateEnv(str?: string): string {
   if (!str) return "";
@@ -89,6 +91,8 @@ function resolveEndpoint(raw: RawEndpointConfig, index: number): EndpointConfig 
 export function loadConfig(configPath?: string): GatewayConfig {
   const defaultPath = process.env.GATEWAY_CONFIG || "./config.yaml";
   const targetPath = configPath || defaultPath;
+  const routingPath = process.env.GATEWAY_ROUTING || join(dirname(targetPath), "routing.yaml");
+  const routing = (process.env.GATEWAY_ROUTING || existsSync(routingPath)) ? loadRoutingConfig(routingPath) : undefined;
 
   let rawContent = "";
   if (existsSync(targetPath)) {
@@ -96,24 +100,15 @@ export function loadConfig(configPath?: string): GatewayConfig {
   } else {
     // If no config file found, fallback to env-based default
     console.log(`[Config] No config file found at ${targetPath}, checking environment variables...`);
-    const key1 = process.env.OPENCODE_API_KEY_1 || "";
-    const key2 = process.env.OPENCODE_API_KEY_2 || "";
-
     const endpoints: EndpointConfig[] = [];
-    if (key1) {
+    for (const n of [1, 2, 3]) {
+      const apiKey = process.env[`OPENCODE_API_KEY_${n}`];
+      if (!apiKey) continue;
       endpoints.push({
-        id: "opencode-go-1",
-        name: "OpenCode Go (Account 1)",
+        id: `opencode-go-${n}`,
+        name: `OpenCode Go (Account ${n})`,
         baseUrl: process.env.OPENCODE_BASE_URL || "https://opencode.ai/zen/go/v1",
-        apiKey: key1,
-      });
-    }
-    if (key2) {
-      endpoints.push({
-        id: "opencode-go-2",
-        name: "OpenCode Go (Account 2)",
-        baseUrl: process.env.OPENCODE_BASE_URL || "https://opencode.ai/zen/go/v1",
-        apiKey: key2,
+        apiKey,
       });
     }
 
@@ -123,6 +118,7 @@ export function loadConfig(configPath?: string): GatewayConfig {
       );
     }
 
+    if (routing) validateRoutingConfig(routing, endpoints.map((endpoint) => endpoint.id));
     return {
       server: {
         host: process.env.HOST || "127.0.0.1",
@@ -135,6 +131,7 @@ export function loadConfig(configPath?: string): GatewayConfig {
         maxRetriesPerRequest: endpoints.length,
       },
       endpoints,
+      routing,
     };
   }
 
@@ -144,6 +141,8 @@ export function loadConfig(configPath?: string): GatewayConfig {
   if (endpoints.length === 0) {
     throw new Error("Invalid configuration: 'endpoints' array must contain at least one endpoint.");
   }
+
+  if (routing) validateRoutingConfig(routing, endpoints.map((endpoint) => endpoint.id));
 
   const config: GatewayConfig = {
     server: {
@@ -160,6 +159,7 @@ export function loadConfig(configPath?: string): GatewayConfig {
         endpoints.length,
     },
     endpoints,
+    routing,
     models: parsed.models || { aliases: {} },
   };
 

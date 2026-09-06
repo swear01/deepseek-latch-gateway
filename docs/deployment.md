@@ -8,6 +8,13 @@ dsh key 名稱 mismatch）就是沒有照本文件執行造成的，改版後請
 
 ## 1. 版本發布流程
 
+OpenCode session header 改版保留已部署的 `0944c14` 優先路由基線；不能
+直接部署仍缺少該基線的舊 main。升級時保留各機現有 config/routing 與
+憑證，只替換對應平台 binary。先備份舊 binary，等該 gateway 的進行中
+連線結束後再重啟；逐台核對新 binary SHA-256、process 啟動時間、health
+與 session header 轉送結果。Mac、四台 NFS hosts、Oracle 及 zeus 的
+swear02（port 35002）都需要驗證；NFS 共用檔案只寫一次。
+
 ```bash
 # 在 main checkout（乾淨、已 pull）
 git checkout main && git pull --ff-only
@@ -40,6 +47,7 @@ bun run build:all        # 產生 dist/deepseek-gateway(-linux-x64/-linux-arm64)
 
 ```bash
 cp dist/deepseek-gateway ~/.local/bin/deepseek-gateway
+cp config.yaml routing.yaml ~/.config/deepseek-gateway/
 launchctl kickstart -k gui/$(id -u)/com.swear.deepseek-gateway
 sleep 2
 curl -s http://127.0.0.1:35001/healthz
@@ -60,6 +68,14 @@ scp dist/deepseek-gateway-linux-arm64 oracle:/tmp/gw-new
 
 ssh mazu   'mv /tmp/gw-new ~/.local/bin/deepseek-gateway'    # NFS 共享 → 四台同檔
 ssh oracle 'mv /tmp/gw-new ~/.local/bin/deepseek-gateway'
+
+# config.yaml and routing.yaml are provider/runtime and route config respectively.
+# On a shared NFS home, stage through /tmp and copy each once through mazu;
+# oracle is independent.
+scp config.yaml routing.yaml mazu:/tmp/
+ssh mazu 'mv /tmp/config.yaml /tmp/routing.yaml ~/.config/deepseek-gateway/'
+scp config.yaml routing.yaml oracle:/tmp/
+ssh oracle 'mv /tmp/config.yaml /tmp/routing.yaml ~/.config/deepseek-gateway/'
 ```
 
 ### 4.2 重啟（每台都要做）
@@ -85,8 +101,10 @@ done
 預期：五台的 md5 都是本地 `md5 -q dist/deepseek-gateway-linux-*` 的對應值，
 service `active`，healthz `status: ok`。
 
-> **重啟後 latch 歸零是正常現象**：`active_index` 回到 0（key 1），
-> 第一筆真實 429 會再翻到 key 2。不是 bug。
+> **重啟後 priority latch 歸零是正常現象**：Flash 先從 Priority 1 的
+> OpenCode Account 1 開始；同組 1/2/3 全部耗盡後才進入 Command Code。
+> Quota cooldown 由 1.5 小時開始；到期後下一筆真實請求會單獨探測
+> Priority 1，成功即自動恢復，其他同時請求仍走 Command Code。
 
 ---
 
@@ -102,6 +120,7 @@ dsh 的 key 解析：`settings.yaml` 的 `apiKeyEnv` → 先查 launch 環境變
 | `OPENCODE_API_KEY` | legacy 名稱，值 == `OPENCODE_API_KEY_1` |
 | `OPENCODE_API_KEY_1` | OpenCode Go 帳號 1（gateway key 1） |
 | `OPENCODE_API_KEY_2` | OpenCode Go 帳號 2（gateway key 2） |
+| `OPENCODE_API_KEY_3` | OpenCode Go 帳號 3（gateway key 3） |
 
 改 `apiKeyEnv` 名稱時，**每台機器的 `.credentials.yaml` 要一起改**，
 不要只改一邊。
