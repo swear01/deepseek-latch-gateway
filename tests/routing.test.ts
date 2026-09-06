@@ -61,6 +61,27 @@ function createConfig(): GatewayConfig {
 }
 
 describe("routing config", () => {
+  it("rejects malformed routing shapes with configuration errors", () => {
+    const group = { priority: 1, members: [{ endpoint: "go" }] };
+    for (const routes of [
+      {}, [], { flash: null }, { flash: 3 }, { flash: { priority_groups: {} } },
+      { flash: { priority_groups: [null] } },
+      { flash: { priority_groups: [{ ...group, members: {} }] } },
+      { flash: { priority_groups: [{ ...group, members: [null] }] } },
+      { flash: { priority_groups: [{ ...group, members: [{ endpoint: 123 }] }] } },
+    ]) {
+      expect(() => loadRoutingConfig(writeTempRouting(JSON.stringify({ routes })))).toThrow("Invalid routing:");
+    }
+  });
+
+  it("treats special model names as own data properties", () => {
+    const route = { priority_groups: [{ priority: 1, members: [{ endpoint: "go" }] }] };
+    const routing = loadRoutingConfig(writeTempRouting(JSON.stringify({ routes: { ["__proto__"]: route, constructor: route } })));
+    expect(Object.keys(routing.routes)).toEqual(["__proto__", "constructor"]);
+    expect(resolveRoute(routing, "__proto__").groups[0].members[0].endpointId).toBe("go");
+    expect(() => resolveRoute({ routes: {} }, "toString")).toThrow("No route configured");
+  });
+
   it("loads explicit priority groups and sorts by priority rather than YAML order", () => {
     const path = writeTempRouting(`
 routes:

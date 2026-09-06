@@ -81,7 +81,7 @@ if (config.routing) {
     console.log(`[Routing] ${model}: ${route.groups.map((group) => `${group.priority}:${group.id}`).join(" -> ")}`);
   }
 }
-console.log(`[Status] Active Initial Endpoint: [0] ${latch.getActiveEndpoint().name}`);
+console.log(`[Status] Active Initial Endpoint: ${latch.getActiveEndpoint().name}`);
 
 process.on("SIGINT", () => {
   console.log("\n[Gateway] Shutting down...");

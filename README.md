@@ -45,6 +45,11 @@ Priority 2: Command Code latch
 
 ### Retry & Failover Semantics
 
+Routing configuration is loaded for both YAML and environment-only endpoint
+configuration. Empty/malformed route mappings and non-string member endpoint IDs
+are rejected at startup with `Invalid routing` errors; special model names are
+handled as literal dictionary keys.
+
 - `max_retries_per_request` bounds endpoint attempts across the selected route. Each endpoint attempt includes one same-endpoint retry for transient network failures.
 - A definitive quota response advances the current group; two network failures skip that endpoint for the current request without counting as a 429.
 - Quota cooldown starts at 1.5 hours and doubles to 3, 6, 12, then at most 24 hours; a shorter upstream `Retry-After` can accelerate recovery but never extend that schedule.

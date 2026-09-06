@@ -28,8 +28,11 @@ interface RawRoutingConfig {
 }
 
 function parseMember(raw: RawRouteMember, routeModel: string, groupId: string, index: number): RouteMemberConfig {
-  const endpointId = raw.endpointId || raw.endpoint_id || raw.endpoint;
-  if (!endpointId) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error(`Invalid routing: route '${routeModel}' group '${groupId}' member ${index + 1} must be a mapping.`);
+  }
+  const endpointId = raw.endpointId ?? raw.endpoint_id ?? raw.endpoint;
+  if (typeof endpointId !== "string" || !endpointId.trim()) {
     throw new Error(`Invalid routing: route '${routeModel}' group '${groupId}' member ${index + 1} needs an endpoint.`);
   }
   return {
@@ -39,6 +42,9 @@ function parseMember(raw: RawRouteMember, routeModel: string, groupId: string, i
 }
 
 function parseGroup(raw: RawRouteGroup, routeModel: string, index: number): RouteGroupConfig {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error(`Invalid routing: route '${routeModel}' group ${index + 1} must be a mapping.`);
+  }
   const id = raw.id || `priority-${index + 1}`;
   if (raw.priority === undefined || !Number.isInteger(raw.priority) || raw.priority < 1) {
     throw new Error(`Invalid routing: route '${routeModel}' group '${id}' needs a positive integer priority.`);
@@ -46,7 +52,10 @@ function parseGroup(raw: RawRouteGroup, routeModel: string, index: number): Rout
   if (raw.mode !== undefined && raw.mode !== "latch") {
     throw new Error(`Invalid routing: route '${routeModel}' group '${id}' mode must be 'latch'.`);
   }
-  const members = (raw.members || []).map((member, memberIndex) =>
+  if (!Array.isArray(raw.members)) {
+    throw new Error(`Invalid routing: route '${routeModel}' group '${id}' members must be an array.`);
+  }
+  const members = raw.members.map((member, memberIndex) =>
     parseMember(member, routeModel, id, memberIndex)
   );
   if (members.length === 0) {
@@ -60,16 +69,22 @@ export function loadRoutingConfig(routingPath: string): RoutingConfig {
     throw new Error(`Routing config not found: ${routingPath}`);
   }
   const parsed = (parseYaml(readFileSync(routingPath, "utf-8")) || {}) as RawRoutingConfig;
-  if (!parsed.routes || typeof parsed.routes !== "object") {
+  if (!parsed.routes || typeof parsed.routes !== "object" || Array.isArray(parsed.routes) || Object.keys(parsed.routes).length === 0) {
     throw new Error("Invalid routing: 'routes' must be a mapping.");
   }
 
-  const routes: Record<string, ModelRouteConfig> = {};
+  const routes: Record<string, ModelRouteConfig> = Object.create(null);
   for (const [model, rawRoute] of Object.entries(parsed.routes)) {
+    if (!rawRoute || typeof rawRoute !== "object" || Array.isArray(rawRoute)) {
+      throw new Error(`Invalid routing: route '${model}' must be a mapping.`);
+    }
     if (rawRoute.mode !== undefined && rawRoute.mode !== "priority-latch") {
       throw new Error(`Invalid routing: route '${model}' mode must be 'priority-latch'.`);
     }
-    const rawGroups = rawRoute.priorityGroups || rawRoute.priority_groups || [];
+    const rawGroups = rawRoute.priorityGroups ?? rawRoute.priority_groups ?? [];
+    if (!Array.isArray(rawGroups)) {
+      throw new Error(`Invalid routing: route '${model}' priority_groups must be an array.`);
+    }
     const groups = rawGroups.map((group, index) => parseGroup(group, model, index));
     const priorities = new Set<number>();
     for (const group of groups) {
@@ -107,7 +122,7 @@ export function validateRoutingConfig(routing: RoutingConfig, endpointIds: Itera
 
 export function resolveRoute(routing: RoutingConfig, model: string): ModelRouteConfig {
   const route = routing.routes[model];
-  if (!route) {
+  if (!Object.hasOwn(routing.routes, model)) {
     throw new Error(`No route configured for model '${model}'.`);
   }
   return route;

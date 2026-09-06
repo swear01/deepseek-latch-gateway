@@ -12,6 +12,21 @@ function writeTempConfig(yaml: string): string {
 }
 
 describe("Config compat parsing", () => {
+  it("loads routing with env-only endpoints", () => {
+    const dir = mkdtempSync(join(tmpdir(), "gw-env-routing-"));
+    writeFileSync(join(dir, "routing.yaml"), JSON.stringify({ routes: { flash: {
+      priority_groups: [{ priority: 1, members: [{ endpoint: "opencode-go-1" }] }],
+    } } }));
+    const previous = process.env.OPENCODE_API_KEY_1;
+    process.env.OPENCODE_API_KEY_1 = "test-key";
+    try {
+      expect(loadConfig(join(dir, "missing.yaml")).routing?.routes.flash.groups[0].members[0].endpointId).toBe("opencode-go-1");
+    } finally {
+      if (previous === undefined) delete process.env.OPENCODE_API_KEY_1;
+      else process.env.OPENCODE_API_KEY_1 = previous;
+    }
+  });
+
   it("parses snake_case compat keys into the camelCase EndpointCompat shape", () => {
     const path = writeTempConfig(`
 server:
