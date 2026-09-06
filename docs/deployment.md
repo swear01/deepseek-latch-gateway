@@ -1,110 +1,104 @@
 # 部署指南（Deployment & Rollout）
 
-本文件是 gateway 改版 + fleet rollout + dsh（DeepSeek Harness）credentials
-同步的**操作手冊**。2026-08-16 的兩次事故（fleet 跑舊 binary 數小時、
-dsh key 名稱 mismatch）就是沒有照本文件執行造成的，改版後請逐項照做。
+本文件是 Gateway fleet rollout 與 dsh credentials 同步的操作手冊。
+Gateway 共 **八台**：Mac、mazu、athena、cthulhu、valkyrie、Oracle、Zeus、swop。
+更新 Swear Review 不代表 Gateway 已更新；只更新磁碟檔案也不代表程序已更新。
 
----
+## 1. 建置與部署共同規則
 
-## 1. 版本發布流程
-
-OpenCode session header 改版保留已部署的 `0944c14` 優先路由基線；不能
-直接部署仍缺少該基線的舊 main。升級時保留各機現有 config/routing 與
-憑證，只替換對應平台 binary。先備份舊 binary，等該 gateway 的進行中
-連線結束後再重啟；逐台核對新 binary SHA-256、process 啟動時間、health
-與 session header 轉送結果。Mac、四台 NFS hosts、Oracle 及 zeus 的
-swear02（port 35002）都需要驗證；NFS 共用檔案只寫一次。
+在 Mac arm64 上，從乾淨、已驗證的提交建立獨立 worktree，再建置四種平台執行檔：
 
 ```bash
-# 在 main checkout（乾淨、已 pull）
-git checkout main && git pull --ff-only
-bun run build:all        # 產生 dist/deepseek-gateway(-linux-x64/-linux-arm64)
+bun install --frozen-lockfile
+bun run build:all
+bun build --compile --minify --target=bun-windows-x64 --outfile=dist/deepseek-gateway.exe src/index.ts
+codesign --force --sign - dist/deepseek-gateway
+codesign --verify --strict dist/deepseek-gateway
+shasum -a 256 dist/deepseek-gateway*
 ```
 
-| binary | 用途 |
+Mac 的 SHA-256 必須在簽章之後計算。Windows build 是額外步驟，目前
+`build:all` 只包含 Mac、Linux x64 與 Linux ARM64。
+
+| binary | 目標 |
 |---|---|
-| `dist/deepseek-gateway` | Mac（arm64），LaunchAgent 用 |
-| `dist/deepseek-gateway-linux-x64` | mazu / athena / cthulhu / valkyrie（NFS 共享） |
-| `dist/deepseek-gateway-linux-arm64` | oracle（aarch64） |
+| `dist/deepseek-gateway` | Mac arm64 |
+| `dist/deepseek-gateway-linux-x64` | mazu、athena、cthulhu、valkyrie、Zeus |
+| `dist/deepseek-gateway-linux-arm64` | Oracle ARM64 |
+| `dist/deepseek-gateway.exe` | swop Windows x64 |
 
-> **只 build 不部署 = 沒有發布。** code 進 main 之後，三種 binary 都要
-> 部署到對應機器，缺一台就是一台舊版。
+每次改版都必須：
 
----
+1. 核對 live executable path、supervisor、port 與既有連線，不能只沿用舊機器清單。
+2. 保留各機 config、routing、launcher、憑證與 supervisor 定義；binary-only 更新不得複製範例設定覆蓋它們。
+3. 在正式路徑外測試候選 binary，核對 SHA-256，備份並驗證舊 binary。
+4. 將候選檔複製到正式 binary 的同目錄暫存檔，再原子替換；不要直接覆寫正在執行的檔案。
+5. 等該 Gateway 的 established 連線清空後，只重啟該 Gateway；保留 HAPI Runner 與其他工作階段。
+6. 驗證新 PID／啟動時間、實際 executable、SHA-256、health、header 轉送及真實推論，最後清理候選暫存並保留回復備份。
 
-## 2. Fleet 機器一覽
+## 2. 八台服務與位置
 
-| 機器 | arch | binary 路徑 | 服務 | 備註 |
+| 機器 | arch | 正式 binary | supervisor | port |
 |---|---|---|---|---|
-| Mac | arm64 | `~/.local/bin/deepseek-gateway` | LaunchAgent `com.swear.deepseek-gateway` | 唯一走 LaunchAgent |
-| mazu / athena / cthulhu / valkyrie | x86_64 | `~/.local/bin/deepseek-gateway`（**NFS 共享同一個檔案**） | `systemctl --user deepseek-gateway` | 寫一次檔案，但**每台各自 restart** |
-| oracle | aarch64 | `~/.local/bin/deepseek-gateway` | `systemctl --user deepseek-gateway` | 獨立 home |
-| zeus（swear02） | — | 由 swear02 帳號管理 | — | swear01 在 zeus 不部署 gateway（zeus 屬 swear02） |
+| Mac | arm64 | `~/.local/bin/deepseek-gateway` | LaunchAgent `com.swear.deepseek-gateway` | 35001 |
+| mazu / athena / cthulhu / valkyrie | x64 | `~/.local/bin/deepseek-gateway`，四台 NFS 共用檔案 | 各台 user systemd `deepseek-gateway` | 35001 |
+| Oracle | ARM64 | `~/.local/bin/deepseek-gateway` | user systemd `deepseek-gateway` | 35001 |
+| Zeus（swear02） | x64 | `~/.local/bin/deepseek-gateway` | user systemd `deepseek-gateway` | 35002 |
+| swop | Windows x64 | `%ProgramData%\DeepSeekGateway\deepseek-gateway.exe` | SYSTEM Scheduled Task `DeepSeek Gateway (SWOP)` | 35001 |
 
----
+所有服務綁定 loopback。Zeus 是獨立 home，必須另外安裝；NFS 四台只替換
+一次檔案，但必須逐台重啟及驗證自己的程序。
 
-## 3. Mac 部署（LaunchAgent）
+## 3. Mac 與 Linux
+
+Mac 在完成備份、簽章驗證、原子替換及連線清空檢查後，用原有 LaunchAgent：
 
 ```bash
-cp dist/deepseek-gateway ~/.local/bin/deepseek-gateway
-cp config.yaml routing.yaml ~/.config/deepseek-gateway/
 launchctl kickstart -k gui/$(id -u)/com.swear.deepseek-gateway
-sleep 2
-curl -s http://127.0.0.1:35001/healthz
+curl -fsS http://127.0.0.1:35001/health
 ```
 
----
+Linux 先 scp 到各目的主機的任務暫存目錄，再複製到正式 binary 的同目錄
+暫存檔後 rename。`/tmp` 可能與 home 不同 filesystem，不能假設跨目錄
+`mv` 本身是原子操作。四台 NFS 主機只經 mazu 替換一次；Oracle、Zeus 各自替換。
 
-## 4. Linux fleet 部署（systemd user unit）
-
-### 4.1 傳檔（注意 NFS gotcha）
-
-**NFS 上 scp 直接覆寫目標檔案會失敗**（`dest open ... Failure`）。
-一律先傳 `/tmp` 再 `mv`：
+每台在沒有進行中連線後重啟並驗證（Zeus 的 health 改用 port 35002）：
 
 ```bash
-scp dist/deepseek-gateway-linux-x64   mazu:/tmp/gw-new
-scp dist/deepseek-gateway-linux-arm64 oracle:/tmp/gw-new
-
-ssh mazu   'mv /tmp/gw-new ~/.local/bin/deepseek-gateway'    # NFS 共享 → 四台同檔
-ssh oracle 'mv /tmp/gw-new ~/.local/bin/deepseek-gateway'
-
-# config.yaml and routing.yaml are provider/runtime and route config respectively.
-# On a shared NFS home, stage through /tmp and copy each once through mazu;
-# oracle is independent.
-scp config.yaml routing.yaml mazu:/tmp/
-ssh mazu 'mv /tmp/config.yaml /tmp/routing.yaml ~/.config/deepseek-gateway/'
-scp config.yaml routing.yaml oracle:/tmp/
-ssh oracle 'mv /tmp/config.yaml /tmp/routing.yaml ~/.config/deepseek-gateway/'
+systemctl --user restart deepseek-gateway
+systemctl --user is-active deepseek-gateway
+gateway_pid=$(systemctl --user show deepseek-gateway -p MainPID --value)
+sha256sum ~/.local/bin/deepseek-gateway /proc/"$gateway_pid"/exe
+curl -fsS http://127.0.0.1:35001/health
 ```
 
-### 4.2 重啟（每台都要做）
+兩個 SHA-256 都必須等於該平台的候選 hash；只檢查磁碟檔案不足以證明新程序。
 
-NFS 共享的是**檔案**，不是 process — mazu 寫檔後 athena/cthulhu/valkyrie
-還是舊 code，必須每台各自 restart：
+## 4. swop（Windows SYSTEM 排程）
 
-```bash
-for h in mazu athena cthulhu valkyrie oracle; do
-  ssh "$h" 'chmod +x ~/.local/bin/deepseek-gateway && systemctl --user restart deepseek-gateway'
-done
-```
+正式 launcher 為 `%ProgramData%\DeepSeekGateway\deepseek-gateway-system.ps1`。
+保留 SYSTEM principal、BootTrigger、排程 XML、config/routing 與 LocalMachine
+DPAPI credentials。不要切換成登入使用者的臨時程序。
 
-### 4.3 驗證（全部機器）
+1. 先對 Windows 候選 exe 執行隔離的 header 封包測試，核對 hash。
+2. 備份正式 exe 與 `%USERPROFILE%\.local\bin\deepseek-gateway.exe` 副本，將候選檔放到各目標旁邊。
+3. 確認 port 35001 無 established 連線，停止 `DeepSeek Gateway (SWOP)`。若舊 child 未退出，只停止 executable path 已核對的 Gateway PID。
+4. 用 `[IO.File]::Replace` 替換兩份 binary，第三個參數使用明確的備份路徑。Windows PowerShell 可能把 `$null` 轉為空字串，造成 `The path is not of a legal form`。
+5. 啟動原排程，確認新 PID、正式 executable path、兩份 binary hash、health，以及設定與排程 XML 未變。失敗則恢復已驗證的備份，再啟動原排程。
 
-```bash
-for h in mazu athena cthulhu valkyrie oracle; do
-  echo "== $h"
-  ssh "$h" 'md5sum ~/.local/bin/deepseek-gateway; systemctl --user is-active deepseek-gateway; curl -s -m 3 http://127.0.0.1:35001/healthz'
-done
-```
+## 驗證邊界與最新部署紀錄
 
-預期：五台的 md5 都是本地 `md5 -q dist/deepseek-gateway-linux-*` 的對應值，
-service `active`，healthz `status: ok`。
+2026-09-07 已部署 PR #10 合併提交 `73f0fb5` 至八台，包括補部署的 swop。
+46 tests、typecheck、四平台建置、原生 header 封包測試通過；八台真實推論
+均回傳 HTTP 200，但使用的是 CommandCode 備援。這不能宣稱 OpenCode
+上游推論已成功；OpenCode header 是否帶出由隔離封包測試證明。
 
-> **重啟後 priority latch 歸零是正常現象**：Flash 先從 Priority 1 的
-> OpenCode Account 1 開始；同組 1/2/3 全部耗盡後才進入 Command Code。
-> Quota cooldown 由 1.5 小時開始；到期後下一筆真實請求會單獨探測
-> Priority 1，成功即自動恢復，其他同時請求仍走 Command Code。
+Header 契約與 fallback 限制見 README 的 session header 說明。必須涵蓋
+caller ID 保留、DSH/Pi alias、重試與後續對話穩定性；沒有 ID 時的開場雜湊
+是 heuristic，精確對話隔離仍需 client 傳入穩定 ID。
+
+重啟會重設 priority latch：先嘗試 OpenCode，耗盡後使用 CommandCode。
+Cooldown 從 1.5 小時開始，到期後由下一筆 request 探測高優先級路由。
 
 ---
 
@@ -161,12 +155,13 @@ ssh <host> 'cd /tmp && env -i HOME=$HOME PATH=<node-bin>:/usr/bin:/bin TERM=xter
 
 ---
 
-## 6. 改版 Checklist（照抄用）
+## 6. 改版 Checklist
 
-- [ ] `git pull --ff-only` + `bun run build:all`
-- [ ] Mac：`cp dist/deepseek-gateway ~/.local/bin/` + `launchctl kickstart -k`
-- [ ] fleet：scp 到 `/tmp` → `mv`（**不要直接 scp 覆寫 NFS 檔**）
-- [ ] fleet：五台各自 `systemctl --user restart deepseek-gateway`
-- [ ] fleet：五台 md5 / healthz 驗證
-- [ ] 若動到 dsh key 名稱：5.3 檢查 + 5.4 乾淨環境實測 + 重啟 `dsh web`
-- [ ] 確認 `/status` 的 `totalSwitches` / `lastSwitchReason` 符合預期
+- [ ] 確認八台清單、正式 executable、supervisor 與 port。
+- [ ] 建置四平台 binary，Mac 簽章後記錄 SHA-256。
+- [ ] 候選原生 header 測試通過；各機舊版備份及 config/routing hash 已保存。
+- [ ] Mac、四台 NFS hosts、Oracle、Zeus、swop 全數安裝並在連線清空後重啟。
+- [ ] 八台新程序、binary hash、health、真實推論已驗證，記錄實際 upstream。
+- [ ] swop 正式與 user-local 副本一致，SYSTEM 排程及憑證保持原樣。
+- [ ] 若動到 dsh key 名稱，執行 5.3／5.4 並更新相關 dsh 程序。
+- [ ] 清理自己的 staging／worktree；保留已驗證的回復備份。
