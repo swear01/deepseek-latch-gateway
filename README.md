@@ -49,6 +49,9 @@ Routing configuration is loaded for both YAML and environment-only endpoint
 configuration. Empty/malformed route mappings and non-string member endpoint IDs
 are rejected at startup with `Invalid routing` errors; special model names are
 handled as literal dictionary keys.
+Group and member names are trimmed, duplicate group IDs and conflicting
+`priorityGroups`/`priority_groups` fields are rejected, and an explicitly set
+`GATEWAY_ROUTING` must point to an existing file.
 
 - `max_retries_per_request` bounds endpoint attempts across the selected route. Each endpoint attempt includes one same-endpoint retry for transient network failures.
 - A definitive quota response advances the current group; two network failures skip that endpoint for the current request without counting as a 429.

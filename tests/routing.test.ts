@@ -69,9 +69,20 @@ describe("routing config", () => {
       { flash: { priority_groups: [{ ...group, members: {} }] } },
       { flash: { priority_groups: [{ ...group, members: [null] }] } },
       { flash: { priority_groups: [{ ...group, members: [{ endpoint: 123 }] }] } },
+      { flash: { priority_groups: [{ ...group, id: 123 }] } },
+      { flash: { priority_groups: [{ ...group, id: "same" }, { ...group, id: " same ", priority: 2 }] } },
+      { flash: { priority_groups: [group], priorityGroups: [] } },
+      { flash: { priority_groups: [{ ...group, members: [{ endpoint: "go", upstream_model: 123 }] }] } },
     ]) {
       expect(() => loadRoutingConfig(writeTempRouting(JSON.stringify({ routes })))).toThrow("Invalid routing:");
     }
+  });
+
+  it("normalizes member names and group IDs", () => {
+    const routing = loadRoutingConfig(writeTempRouting(JSON.stringify({ routes: { flash: {
+      priority_groups: [{ id: " go ", priority: 1, members: [{ endpoint: " key ", upstream_model: " model " }] }],
+    } } })));
+    expect(routing.routes.flash.groups[0]).toEqual({ id: "go", priority: 1, mode: "latch", members: [{ endpointId: "key", upstreamModel: "model" }] });
   });
 
   it("treats special model names as own data properties", () => {

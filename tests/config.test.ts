@@ -12,6 +12,17 @@ function writeTempConfig(yaml: string): string {
 }
 
 describe("Config compat parsing", () => {
+  it("rejects an explicitly configured missing routing file", () => {
+    const previous = process.env.GATEWAY_ROUTING;
+    process.env.GATEWAY_ROUTING = join(mkdtempSync(join(tmpdir(), "gw-missing-routing-")), "absent.yaml");
+    try {
+      expect(() => loadConfig()).toThrow("Routing config not found");
+    } finally {
+      if (previous === undefined) delete process.env.GATEWAY_ROUTING;
+      else process.env.GATEWAY_ROUTING = previous;
+    }
+  });
+
   it("loads routing with env-only endpoints", () => {
     const dir = mkdtempSync(join(tmpdir(), "gw-env-routing-"));
     writeFileSync(join(dir, "routing.yaml"), JSON.stringify({ routes: { flash: {

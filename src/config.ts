@@ -92,7 +92,7 @@ export function loadConfig(configPath?: string): GatewayConfig {
   const defaultPath = process.env.GATEWAY_CONFIG || "./config.yaml";
   const targetPath = configPath || defaultPath;
   const routingPath = process.env.GATEWAY_ROUTING || join(dirname(targetPath), "routing.yaml");
-  const routing = existsSync(routingPath) ? loadRoutingConfig(routingPath) : undefined;
+  const routing = process.env.GATEWAY_ROUTING || existsSync(routingPath) ? loadRoutingConfig(routingPath) : undefined;
 
   let rawContent = "";
   if (existsSync(targetPath)) {

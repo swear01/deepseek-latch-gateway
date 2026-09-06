@@ -35,9 +35,13 @@ function parseMember(raw: RawRouteMember, routeModel: string, groupId: string, i
   if (typeof endpointId !== "string" || !endpointId.trim()) {
     throw new Error(`Invalid routing: route '${routeModel}' group '${groupId}' member ${index + 1} needs an endpoint.`);
   }
+  const upstreamModel = raw.upstreamModel ?? raw.upstream_model;
+  if (upstreamModel !== undefined && (typeof upstreamModel !== "string" || !upstreamModel.trim())) {
+    throw new Error(`Invalid routing: route '${routeModel}' member upstream_model must be a non-empty string.`);
+  }
   return {
-    endpointId,
-    upstreamModel: raw.upstreamModel || raw.upstream_model,
+    endpointId: endpointId.trim(),
+    upstreamModel: upstreamModel?.trim(),
   };
 }
 
@@ -45,7 +49,10 @@ function parseGroup(raw: RawRouteGroup, routeModel: string, index: number): Rout
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
     throw new Error(`Invalid routing: route '${routeModel}' group ${index + 1} must be a mapping.`);
   }
-  const id = raw.id || `priority-${index + 1}`;
+  if (raw.id !== undefined && (typeof raw.id !== "string" || !raw.id.trim())) {
+    throw new Error(`Invalid routing: route '${routeModel}' group ${index + 1} id must be a non-empty string.`);
+  }
+  const id = raw.id?.trim() || `priority-${index + 1}`;
   if (raw.priority === undefined || !Number.isInteger(raw.priority) || raw.priority < 1) {
     throw new Error(`Invalid routing: route '${routeModel}' group '${id}' needs a positive integer priority.`);
   }
@@ -81,17 +88,26 @@ export function loadRoutingConfig(routingPath: string): RoutingConfig {
     if (rawRoute.mode !== undefined && rawRoute.mode !== "priority-latch") {
       throw new Error(`Invalid routing: route '${model}' mode must be 'priority-latch'.`);
     }
-    const rawGroups = rawRoute.priorityGroups ?? rawRoute.priority_groups ?? [];
+    if (rawRoute.priorityGroups !== undefined && rawRoute.priority_groups !== undefined) {
+      throw new Error(`Invalid routing: route '${model}' must not set both priorityGroups and priority_groups.`);
+    }
+    const groupsKey = rawRoute.priorityGroups !== undefined ? "priorityGroups" : "priority_groups";
+    const rawGroups = rawRoute[groupsKey] ?? [];
     if (!Array.isArray(rawGroups)) {
-      throw new Error(`Invalid routing: route '${model}' priority_groups must be an array.`);
+      throw new Error(`Invalid routing: route '${model}' ${groupsKey} must be an array.`);
     }
     const groups = rawGroups.map((group, index) => parseGroup(group, model, index));
     const priorities = new Set<number>();
+    const groupIds = new Set<string>();
     for (const group of groups) {
       if (priorities.has(group.priority)) {
         throw new Error(`Invalid routing: route '${model}' has duplicate priority ${group.priority}.`);
       }
       priorities.add(group.priority);
+      if (groupIds.has(group.id)) {
+        throw new Error(`Invalid routing: route '${model}' has duplicate group id '${group.id}'.`);
+      }
+      groupIds.add(group.id);
     }
     groups.sort((a, b) => a.priority - b.priority);
     if (groups.length === 0) {
