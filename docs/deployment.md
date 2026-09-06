@@ -8,6 +8,13 @@ dsh key 名稱 mismatch）就是沒有照本文件執行造成的，改版後請
 
 ## 1. 版本發布流程
 
+OpenCode session header 改版保留已部署的 `0944c14` 優先路由基線；不能
+直接部署仍缺少該基線的舊 main。升級時保留各機現有 config/routing 與
+憑證，只替換對應平台 binary。先備份舊 binary，等該 gateway 的進行中
+連線結束後再重啟；逐台核對新 binary SHA-256、process 啟動時間、health
+與 session header 轉送結果。Mac、四台 NFS hosts、Oracle 及 zeus 的
+swear02（port 35002）都需要驗證；NFS 共用檔案只寫一次。
+
 ```bash
 # 在 main checkout（乾淨、已 pull）
 git checkout main && git pull --ff-only

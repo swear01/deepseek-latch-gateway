@@ -6,6 +6,25 @@ Features a stateful **RS-Latch (Bistable Sticky Failover)** mechanism that compl
 
 ---
 
+## OpenCode session headers
+
+For POST requests to `opencode.ai`, the gateway preserves the caller's
+`x-opencode-session`. When absent, it uses the first nonempty header from
+`x-deepseek-harness-session-id`, `x-session-id`, `x-session-affinity`, and
+`session_id`. Endpoint-level static headers cannot override this identity.
+
+Clients without an ID receive a SHA-256 affinity key derived from the opening
+user message and client identity (incoming Authorization, DSH user ID, and body
+`user`). Chat messages, Responses `input`, and completion `prompt` are supported.
+The key remains stable when later turns are appended, including retries and
+provider failover. Only the hash is sent; this feature does not store prompts.
+
+This fallback is a heuristic: identical openings for the same client share an
+affinity key, and truncating or replacing the opening during compaction changes
+it. Send an explicit session header for exact conversation isolation. Requests
+with neither an ID nor an opening receive HTTP 400 `missing_session_id` without
+calling OpenCode. Other providers keep their existing header behavior.
+
 ## ⚡ Core Mechanism: Hierarchical Priority Latch
 
 The gateway uses an outer priority chain and an independent RS-Latch inside each priority group:

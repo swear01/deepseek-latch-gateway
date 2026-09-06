@@ -1,6 +1,7 @@
 import type { GatewayConfig, EndpointConfig } from "./types";
 import type { RSLatchManager } from "./latch";
 import { PriorityLatchManager } from "./priority-latch";
+import { createHash } from "node:crypto";
 
 interface ProxyRequestContext {
   req: Request;
@@ -122,6 +123,27 @@ async function forwardToEndpoint(
     for (const [k, v] of Object.entries(endpoint.extraHeaders)) {
       headers.set(k, v);
     }
+  }
+
+  if (new URL(targetUrl).hostname === "opencode.ai" && method === "POST") {
+    let sessionId = ["x-opencode-session", "x-deepseek-harness-session-id", "x-session-id", "x-session-affinity", "session_id"]
+      .map((name) => req.headers.get(name)?.trim()).find(Boolean);
+    if (!sessionId) {
+      const body = parsed?.json;
+      const messages = body && (Array.isArray(body.messages) ? body.messages : body.input);
+      const opening = Array.isArray(messages)
+        ? messages.find((message) => message?.role === "user")?.content
+        : typeof messages === "string" ? messages : body?.prompt;
+      if (opening === undefined || opening === null) {
+        return Response.json({ error: { type: "invalid_request_error", code: "missing_session_id",
+          message: "Send x-opencode-session with a stable conversation ID when no opening user message is available." } }, { status: 400 });
+      }
+      // ponytail: identical openings share affinity; clients must send a session ID for exact isolation and compaction.
+      sessionId = createHash("sha256").update(JSON.stringify([
+        req.headers.get("authorization"), req.headers.get("x-deepseek-harness-user-id"), body?.user, opening,
+      ])).digest("hex");
+    }
+    headers.set("x-opencode-session", sessionId);
   }
 
   return fetch(targetUrl, {
