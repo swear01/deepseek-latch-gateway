@@ -88,10 +88,20 @@ DPAPI credentials。不要切換成登入使用者的臨時程序。
 
 ## 驗證邊界與最新部署紀錄
 
-2026-09-07 已部署 PR #10 合併提交 `73f0fb5` 至八台，包括補部署的 swop。
-46 tests、typecheck、四平台建置、原生 header 封包測試通過；八台真實推論
-均回傳 HTTP 200，但使用的是 CommandCode 備援。這不能宣稱 OpenCode
-上游推論已成功；OpenCode header 是否帶出由隔離封包測試證明。
+2026-09-11 已部署 PR #12 合併提交 `4fa6687`（fix head `f4d7eb3`）至
+Mac、四台 NFS、Oracle、Zeus。classifier 把 OpenCode Zen `401 CreditsError` /
+`Insufficient balance` 當 quota，同一 request 內 failover，不再把 401 原樣
+轉給 Pi/HAPI。47 tests、typecheck、四平台建置通過；七台 Linux/Mac 的磁碟與
+`/proc/<pid>/exe`（Mac 為新 PID + 已簽章 binary）SHA-256 吻合，config/routing
+未變。真實推論皆 HTTP 200，`X-Gateway-Active-Endpoint: command-code`，
+`X-Gateway-Attempt: 4`。這證明 CreditsError 會 latch 到 Command Code，不證明
+OpenCode 上游推論成功。
+
+swop 未部署：舊區網 SSH 不通、mDNS 無 `Swear01_PC`、現行 HAPI machine 列表
+只有七台且沒有 swop。找到主機前不要把 Windows exe 當成已上線。
+
+先前 2026-09-07 的 PR #10 / `73f0fb5` 八台 session-header rollout 仍是該
+契約的基準；本次只換 binary。
 
 Header 契約與 fallback 限制見 README 的 session header 說明。必須涵蓋
 caller ID 保留、DSH/Pi alias、重試與後續對話穩定性；沒有 ID 時的開場雜湊
