@@ -171,6 +171,42 @@ describe("hierarchical priority routing", () => {
     }
   });
 
+  it("treats OpenCode CreditsError 401 as quota and fails over to Command Code", async () => {
+    const credits = Bun.serve({
+      port: 19111,
+      fetch() {
+        return new Response(
+          JSON.stringify({
+            type: "error",
+            error: {
+              type: "CreditsError",
+              message:
+                "Insufficient balance. Manage your billing here: https://opencode.ai/workspace/wrk_example/billing",
+            },
+          }),
+          { status: 401, headers: { "Content-Type": "application/json" } }
+        );
+      },
+    });
+    try {
+      const config = createConfig();
+      config.endpoints[0] = { ...config.endpoints[0], baseUrl: "http://127.0.0.1:19111/v1" };
+      const manager = new PriorityLatchManager(config);
+
+      const response = await postChat(manager, config);
+
+      expect(response.status).toBe(200);
+      expect(response.headers.get("X-Gateway-Active-Endpoint")).toBe("command-code");
+      const key1 = manager.getStatus().endpoints.find((endpoint) => endpoint.id === "opencode-go-1")!;
+      const cooldown = Date.parse(key1.blockedUntil!) - Date.now();
+      expect(key1.errors429).toBe(1);
+      expect(cooldown).toBeGreaterThan(5_399_000);
+      expect(cooldown).toBeLessThanOrEqual(5_400_000);
+    } finally {
+      credits.stop();
+    }
+  });
+
   it("releases a half-open probe when the request attempt budget ends", async () => {
     let now = 0;
     const config = createConfig();
