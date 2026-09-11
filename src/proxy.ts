@@ -30,7 +30,9 @@ function isRateLimitOrQuotaError(status: number, bodyText: string): boolean {
     lower.includes("gousagelimiterror") ||
     lower.includes("usagelimiterror") ||
     lower.includes("weekly usage limit") ||
-    lower.includes("regionerror")
+    lower.includes("regionerror") ||
+    lower.includes("creditserror") ||
+    lower.includes("insufficient balance")
   ) {
     return true;
   }

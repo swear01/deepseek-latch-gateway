@@ -60,11 +60,17 @@ of `json_schema` (or a malformed `response_format`) gets an official-style 400
 call, so no client can depend on out-of-contract endpoint capability.
 
 ### 10. OpenCode Go account usage limits
-OpenCode Go answers quota exhaustion with a **429 JSON body**
+OpenCode Go answers subscription quota exhaustion with a **429 JSON body**
 (`{"type":"error","error":{"type":"GoUsageLimitError","message":"Weekly usage
 limit reached..."}}`, not SSE) — `isRateLimitOrQuotaError` matches status 429
 and `weekly usage limit` so the latch still flips. Key 1 was
 observed at weekly limit while key 2 stayed healthy.
+
+Zen **balance** exhaustion is a different shape: HTTP **401**
+(`{"type":"error","error":{"type":"CreditsError","message":"Insufficient
+balance..."}}`). That is also quota. The classifier matches `creditserror` and
+`insufficient balance` so the request latches instead of forwarding 401. A
+plain 401 without those strings is still treated as a normal client error.
 
 ### 11. Provider and routing configuration are separate
 
