@@ -52,7 +52,7 @@ beforeAll(() => {
       }
       commandHits++;
       const body = await req.json();
-      commandModel = body.model;
+      commandModel = body?.model;
       return Response.json({ choices: [{ message: { role: "assistant", content: "fallback" } }] });
     },
   });
@@ -290,5 +290,25 @@ describe("hierarchical priority routing", () => {
     } finally {
       commandCodeStatus = 200;
     }
+  });
+
+  it("does not treat a null JSON body as a network failure when extraBody is set", async () => {
+    const config = createConfig();
+    for (const endpoint of config.endpoints) {
+      endpoint.extraBody = { provider: { sort: "throughput" } };
+    }
+    const manager = new PriorityLatchManager(config);
+    const req = new Request("http://127.0.0.1:8080/v1/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "null",
+    });
+    const response = await handleProxyRequest({
+      req,
+      url: new URL(req.url),
+      latch: manager,
+      config,
+    });
+    expect(response.status).toBe(200);
   });
 });

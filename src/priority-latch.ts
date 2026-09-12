@@ -93,29 +93,28 @@ export class PriorityLatchManager {
   public getAttempt(model: string, excluded: Set<string> = new Set()): PriorityRouteAttempt | undefined {
     const state = this.getState(model);
     const now = this.now();
-    let attempt: PriorityRouteAttempt | undefined;
     if (state.recoveryProbeOwner && state.recoveryProbeOwner !== excluded) {
-      attempt = this.findAttempt(
+      return this.findAttempt(
         model,
         state,
         state.recoveryFallbackGroupIndex!,
         excluded,
         now
       );
-    } else {
-      if (!state.recoveryProbeOwner && state.activeGroupIndex > 0) {
-        const fallbackGroupIndex = state.activeGroupIndex;
-        const recovered = this.findAttempt(model, state, 0, excluded, now, fallbackGroupIndex, false);
-        if (recovered) {
-          state.recoveryProbeOwner = excluded;
-          state.recoveryFallbackGroupIndex = fallbackGroupIndex;
-          state.activeGroupIndex = recovered.groupIndex;
-          state.activeMemberIndexes[recovered.groupIndex] = recovered.memberIndex;
-          return recovered;
-        }
-      }
-      attempt = this.findAttempt(model, state, state.activeGroupIndex, excluded, now);
     }
+    let attempt: PriorityRouteAttempt | undefined;
+    if (!state.recoveryProbeOwner && state.activeGroupIndex > 0) {
+      const fallbackGroupIndex = state.activeGroupIndex;
+      const recovered = this.findAttempt(model, state, 0, excluded, now, fallbackGroupIndex, false);
+      if (recovered) {
+        state.recoveryProbeOwner = excluded;
+        state.recoveryFallbackGroupIndex = fallbackGroupIndex;
+        state.activeGroupIndex = recovered.groupIndex;
+        state.activeMemberIndexes[recovered.groupIndex] = recovered.memberIndex;
+        return recovered;
+      }
+    }
+    attempt = this.findAttempt(model, state, state.activeGroupIndex, excluded, now);
     return attempt ?? this.findAttempt(model, state, 0, excluded, now, state.route.groups.length, false, true);
   }
 

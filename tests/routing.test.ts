@@ -236,6 +236,28 @@ describe("PriorityLatchManager", () => {
     expect(manager.getAttempt(model, new Set())?.endpoint.id).toBe("opencode-go-1");
   });
 
+  it("does not let concurrent requests bypass a recovery probe onto group 0", () => {
+    let now = 0;
+    const manager = new PriorityLatchManager(createConfig(), () => now);
+    const model = "deepseek-v4-flash";
+
+    for (let index = 0; index < 3; index++) {
+      const attempt = manager.getAttempt(model);
+      manager.record429(model, attempt!);
+      manager.advance(model, attempt!, "429");
+    }
+    const fallback = manager.getAttempt(model)!;
+    expect(fallback.endpoint.id).toBe("command-code");
+    now = 60 * 1000;
+    manager.record429(model, fallback);
+    manager.advance(model, fallback, "429");
+
+    now = 90 * 60 * 1000;
+    const probeRequest = new Set<string>();
+    expect(manager.getAttempt(model, probeRequest)?.endpoint.id).toBe("opencode-go-1");
+    expect(manager.getAttempt(model, new Set())).toBeUndefined();
+  });
+
   it("walks the route again from priority 1 when every circuit is open", () => {
     const manager = new PriorityLatchManager(createConfig());
     const model = "deepseek-v4-flash";
