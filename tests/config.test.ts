@@ -153,4 +153,30 @@ routes:
     expect(config.endpoints.find((endpoint) => endpoint.id === "command-code")?.models).toBeUndefined();
     expect(config.endpoints.find((endpoint) => endpoint.id === "command-code")?.modelMap).toBeUndefined();
   });
+
+  it("loads OpenRouter extra_body provider caps", () => {
+    const path = writeTempConfig(`
+server:
+  port: 35001
+strategy:
+  mode: latch
+endpoints:
+  - id: openrouter
+    base_url: https://openrouter.ai/api/v1
+    api_key: or-key
+    extra_body:
+      provider:
+        sort: throughput
+        max_price:
+          prompt: 0.15
+          completion: 0.60
+`);
+    const config = loadConfig(path);
+    expect(config.endpoints[0].extraBody).toEqual({
+      provider: {
+        sort: "throughput",
+        max_price: { prompt: 0.15, completion: 0.60 },
+      },
+    });
+  });
 });

@@ -98,7 +98,8 @@ async function forwardToEndpoint(
       parsed.json !== null &&
       typeof parsed.json === "object" &&
       "response_format" in parsed.json;
-    if (mappedModel || stripResponseFormat) {
+    const extraBody = endpoint.extraBody;
+    if (mappedModel || stripResponseFormat || extraBody) {
       if (mappedModel) {
         parsed.json.model = mappedModel;
       }
@@ -106,6 +107,9 @@ async function forwardToEndpoint(
         // Upstream rejects the official response_format param (e.g. Command
         // Code 400 "Invalid input", OpenCode Go 400 "must contain the word json").
         delete parsed.json.response_format;
+      }
+      if (extraBody) {
+        Object.assign(parsed.json, extraBody);
       }
       finalBodyText = JSON.stringify(parsed.json);
     }
@@ -389,7 +393,7 @@ async function handlePriorityProxyRequest(ctx: {
   const { req, url, latch, config, model, bodyText } = ctx;
   const method = req.method;
   const pathWithQuery = url.pathname + url.search;
-  const maxAttempts = Math.min(config.strategy.maxRetriesPerRequest, latch.getRouteSize(model));
+  const maxAttempts = Math.max(config.strategy.maxRetriesPerRequest, latch.getRouteSize(model));
   const rejected = new Set<string>();
   const quotaRejected = new Set<string>();
   const networkFailures: string[] = [];

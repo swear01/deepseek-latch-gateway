@@ -25,6 +25,7 @@ export interface EndpointConfig {
   compat?: EndpointCompat;
   weight?: number;
   extraHeaders?: Record<string, string>;
+  extraBody?: Record<string, unknown>;
 }
 
 export interface RouteMemberConfig {

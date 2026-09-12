@@ -41,7 +41,28 @@ endpoints:
     compat:
       strip_response_format: true
 
+  - id: "openrouter"
+    name: "OpenRouter (fast capped)"
+    base_url: "https://openrouter.ai/api/v1"
+    api_key: "${OPENROUTER_API_KEY}"
+    extra_body:
+      provider:
+        sort: "throughput"
+        max_price:
+          prompt: 0.15
+          completion: 0.60
+        ignore:
+          - "decart"
+          - "baseten"
+          - "phala"
+          - "mancer"
+          - "wafer"
+          - "io.net"
+        allow_fallbacks: true
+
 models:
   allow:
+    - "deepseek-flash"
+    - "deepseek-pro"
     - "deepseek-v4-flash"
     - "deepseek-v4-pro"

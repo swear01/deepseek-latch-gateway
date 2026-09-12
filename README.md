@@ -53,7 +53,7 @@ Group and member names are trimmed, duplicate group IDs and conflicting
 `priorityGroups`/`priority_groups` fields are rejected, and an explicitly set
 `GATEWAY_ROUTING` must point to an existing file.
 
-- `max_retries_per_request` bounds endpoint attempts across the selected route. Each endpoint attempt includes one same-endpoint retry for transient network failures.
+- `max_retries_per_request` is a floor, not a ceiling, on priority-route attempts: a request always walks every remaining route member in priority order. Circuit cooldown only skips a source when a later unblocked source exists. Each endpoint attempt includes one same-endpoint retry for transient network failures.
 - A definitive quota response advances the current group; two network failures skip that endpoint for the current request without counting as a 429.
 - Quota cooldown starts at 1.5 hours and doubles to 3, 6, 12, then at most 24 hours; a shorter upstream `Retry-After` can accelerate recovery but never extend that schedule.
 - While a recovery probe is in flight, concurrent requests continue on the fallback. A successful probe immediately restores the higher-priority route.
@@ -71,7 +71,7 @@ model names.
 
 ```yaml
 routes:
-  deepseek-v4-flash:
+  deepseek-flash:
     mode: "priority-latch"
     priority_groups:
       - id: "opencode-go"
@@ -86,9 +86,20 @@ routes:
         mode: "latch"
         members:
           - endpoint: "command-code"
-            upstream_model: "deepseek/deepseek-v4-flash"
+            upstream_model: "deepseek/deepseek-v4.1-flash"
+      - id: "openrouter-fallback"
+        priority: 3
+        mode: "latch"
+        members:
+          - endpoint: "openrouter"
+            upstream_model: "deepseek/deepseek-v4.1-flash"
 ```
 
+Priority is only attempt order. A request walks every remaining member before
+returning 429. `deepseek-flash` uses OpenRouter last with
+`deepseek/deepseek-v4.1-flash`; the legacy `deepseek-v4-flash` route keeps
+`deepseek/deepseek-v4-flash-0731`. The shared OpenRouter endpoint caps
+`max_price` at $0.15 / $0.60 so the official V4.1 Flash provider is eligible.
 The same `command-code` provider can be referenced by the Pro route with a
 different `upstream_model`; it is not duplicated in the provider list.
 
@@ -150,6 +161,7 @@ export OPENCODE_API_KEY_1="sk-opencode-account-1"
 export OPENCODE_API_KEY_2="sk-opencode-account-2"
 export OPENCODE_API_KEY_3="sk-opencode-account-3"
 export COMMAMD_CODE_API_KEY="sk-command-code"
+export OPENROUTER_API_KEY="sk-or-v1-openrouter"
 ```
 
 ### 3. Run Gateway

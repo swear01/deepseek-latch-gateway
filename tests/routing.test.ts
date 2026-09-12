@@ -132,6 +132,20 @@ routes:
     ]);
     expect(route.groups[1].members[0].upstreamModel).toBe("deepseek/deepseek-v4-flash");
   });
+
+  it("ships deepseek-flash with OpenRouter as the last priority group", () => {
+    const routing = loadRoutingConfig(join(import.meta.dir, "../routing.example.yaml"));
+    const flash = resolveRoute(routing, "deepseek-flash");
+    expect(flash.groups.map((group) => group.id)).toEqual([
+      "opencode-go",
+      "command-code-fallback",
+      "openrouter-fallback",
+    ]);
+    expect(flash.groups[2].members[0]).toEqual({
+      endpointId: "openrouter",
+      upstreamModel: "deepseek/deepseek-v4.1-flash",
+    });
+  });
 });
 
 describe("PriorityLatchManager", () => {
@@ -220,6 +234,20 @@ describe("PriorityLatchManager", () => {
     expect(manager.getAttempt(model)?.endpoint.id).toBe("command-code");
     now++;
     expect(manager.getAttempt(model, new Set())?.endpoint.id).toBe("opencode-go-1");
+  });
+
+  it("walks the route again from priority 1 when every circuit is open", () => {
+    const manager = new PriorityLatchManager(createConfig());
+    const model = "deepseek-v4-flash";
+
+    for (let index = 0; index < 4; index++) {
+      const attempt = manager.getAttempt(model);
+      expect(attempt).toBeDefined();
+      manager.record429(model, attempt!);
+      manager.advance(model, attempt!, "429");
+    }
+
+    expect(manager.getAttempt(model)?.endpoint.id).toBe("opencode-go-1");
   });
 
   it("clears the selected endpoint circuit on a manual switch", () => {
