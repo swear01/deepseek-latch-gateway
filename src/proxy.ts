@@ -97,6 +97,12 @@ async function forwardToEndpoint(
       endpoint.compat?.stripResponseFormat && "response_format" in parsed.json;
     const extraBody = endpoint.extraBody;
     if (mappedModel || stripResponseFormat || extraBody) {
+      if (extraBody) {
+        for (const [key, value] of Object.entries(extraBody)) {
+          if (key === "model" || key === "response_format") continue;
+          parsed.json[key] = value;
+        }
+      }
       if (mappedModel) {
         parsed.json.model = mappedModel;
       }
@@ -104,9 +110,6 @@ async function forwardToEndpoint(
         // Upstream rejects the official response_format param (e.g. Command
         // Code 400 "Invalid input", OpenCode Go 400 "must contain the word json").
         delete parsed.json.response_format;
-      }
-      if (extraBody) {
-        Object.assign(parsed.json, extraBody);
       }
       finalBodyText = JSON.stringify(parsed.json);
     }
@@ -463,15 +466,13 @@ async function handlePriorityProxyRequest(ctx: {
       latch.advance(model, attempt, networkError);
     }
     attempts++;
-
-    if (attempts >= maxAttempts && networkError && quotaRejected.size === 0) {
-      console.error(`[Upstream Unreachable] ${networkFailures.join("; ")}`);
-      latch.finishRequest(model, rejected);
-      return unreachableResponse("all attempted upstream endpoints unreachable");
-    }
   }
 
   latch.finishRequest(model, rejected);
+  if (quotaRejected.size === 0 && networkFailures.length > 0) {
+    console.error(`[Upstream Unreachable] ${networkFailures.join("; ")}`);
+    return unreachableResponse("all attempted upstream endpoints unreachable");
+  }
   return new Response(
     JSON.stringify({
       error: {

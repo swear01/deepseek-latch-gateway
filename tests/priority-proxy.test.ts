@@ -265,6 +265,8 @@ describe("hierarchical priority routing", () => {
       baseUrl: "http://127.0.0.1:19105/v1",
       apiKey: "or-key",
       extraBody: {
+        model: "should-not-override-upstream-model",
+        response_format: { type: "json_object" },
         provider: { sort: "throughput", max_price: { prompt: 0.15, completion: 0.60 } },
       },
     });
@@ -287,6 +289,7 @@ describe("hierarchical priority routing", () => {
         model: "deepseek/deepseek-v4.1-flash",
         provider: { sort: "throughput", max_price: { prompt: 0.15, completion: 0.60 } },
       });
+      expect(openRouterBody).not.toHaveProperty("response_format");
     } finally {
       commandCodeStatus = 200;
     }
@@ -310,5 +313,23 @@ describe("hierarchical priority routing", () => {
       config,
     });
     expect(response.status).toBe(200);
+  });
+
+  it("returns 502 not 429 when every priority source is unreachable even if maxRetries exceeds route size", async () => {
+    const config = createConfig();
+    config.strategy.maxRetriesPerRequest = 10;
+    const manager = new PriorityLatchManager(config);
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      throw new Error("The socket connection was closed unexpectedly");
+    }) as unknown as typeof fetch;
+    try {
+      const response = await postChat(manager, config);
+      expect(response.status).toBe(502);
+      const body = await response.json();
+      expect(body.error.code).toBe("upstream_unreachable");
+    } finally {
+      globalThis.fetch = realFetch;
+    }
   });
 });
