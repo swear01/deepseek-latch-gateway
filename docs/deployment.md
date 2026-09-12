@@ -88,20 +88,32 @@ DPAPI credentials。不要切換成登入使用者的臨時程序。
 
 ## 驗證邊界與最新部署紀錄
 
-2026-09-11 已部署 PR #12 合併提交 `4fa6687`（fix head `f4d7eb3`）至
-Mac、四台 NFS、Oracle、Zeus。classifier 把 OpenCode Zen `401 CreditsError` /
-`Insufficient balance` 當 quota，同一 request 內 failover，不再把 401 原樣
-轉給 Pi/HAPI。47 tests、typecheck、四平台建置通過；七台 Linux/Mac 的磁碟與
-`/proc/<pid>/exe`（Mac 為新 PID + 已簽章 binary）SHA-256 吻合，config/routing
-未變。真實推論皆 HTTP 200，`X-Gateway-Active-Endpoint: command-code`，
-`X-Gateway-Attempt: 4`。這證明 CreditsError 會 latch 到 Command Code，不證明
-OpenCode 上游推論成功。
+2026-09-12 已部署 PR #14 合併提交 `9507d17`（fix head `9addc3d`）至
+Mac、四台 NFS、Oracle、Zeus。priority 只決定嘗試順序：同一 request 會走完
+route 上剩餘 source，circuit 全開時仍 last-resort 再打一次；`extra_body`
+會轉給上游，且不能覆寫 `model` / `response_format`。live `deepseek-flash`
+補上 OpenRouter（`upstream_model: deepseek/deepseek-v4.1-flash`），OpenRouter
+`max_price` 改為 prompt `0.15` / completion `0.60`。55 tests、typecheck、
+四平台建置通過；七台 Linux/Mac 的磁碟與 `/proc/<pid>/exe`（Mac 為新 PID +
+已簽章 binary）SHA-256 吻合。真實 `deepseek-flash` 推論皆 HTTP 200，
+`X-Gateway-Active-Endpoint: command-code`（多數 `X-Gateway-Attempt: 4`，
+Oracle 因重啟後既有 loopback 流量已 latch 到 Command Code 而為 1）。這證明
+Go 額度用盡後會落到 Command Code，不證明 OpenCode 上游推論成功，也不證明
+OpenRouter 已被這次流量打到（CC 成功所以沒有走到第三組）。
+
+SHA-256（Mac 為簽章後）：
+
+- Mac arm64 `c3969b520371f37a404e6f4184630e0c7682dd5102f29e32918fd1240b26d673`
+- Linux x64 `37bf5804cd519d836575ad76fa2304a150034df9dc6fe87fa346fda52bb7d803`
+- Linux ARM64 `ec299ae32680110c6b91e2d2179f9bbd5ffbed04b71383792cb3262d725c5a91`
+- Windows x64 `e5b960e10bae928ab12b0de957fc9da334d3df9fa898947ac85a0107198c40b7`（已建置，未安裝）
 
 swop 未部署：舊區網 SSH 不通、mDNS 無 `Swear01_PC`、現行 HAPI machine 列表
-只有七台且沒有 swop。找到主機前不要把 Windows exe 當成已上線。
+只有七台且沒有 swop。Windows exe 已建置但未安裝；找到主機前不要當成已上線。
 
-先前 2026-09-07 的 PR #10 / `73f0fb5` 八台 session-header rollout 仍是該
-契約的基準；本次只換 binary。
+先前 2026-09-11 的 PR #12 / `4fa6687` CreditsError classifier rollout
+與 2026-09-07 的 PR #10 / `73f0fb5` 八台 session-header rollout 仍是該
+契約的基準；本次同時換 binary 與 live routing/config。
 
 Header 契約與 fallback 限制見 README 的 session header 說明。必須涵蓋
 caller ID 保留、DSH/Pi alias、重試與後續對話穩定性；沒有 ID 時的開場雜湊
