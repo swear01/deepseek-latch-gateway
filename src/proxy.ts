@@ -91,14 +91,18 @@ async function forwardToEndpoint(
 ): Promise<Response> {
   let finalBodyText = bodyText;
   const parsed = parseRequestBody(bodyText);
-  if (parsed) {
+  if (parsed && parsed.json !== null && typeof parsed.json === "object") {
     const mappedModel = modelMap && parsed.model ? modelMap[parsed.model] : undefined;
     const stripResponseFormat =
-      endpoint.compat?.stripResponseFormat &&
-      parsed.json !== null &&
-      typeof parsed.json === "object" &&
-      "response_format" in parsed.json;
-    if (mappedModel || stripResponseFormat) {
+      endpoint.compat?.stripResponseFormat && "response_format" in parsed.json;
+    const extraBody = endpoint.extraBody;
+    if (mappedModel || stripResponseFormat || extraBody) {
+      if (extraBody) {
+        for (const [key, value] of Object.entries(extraBody)) {
+          if (key === "model" || key === "response_format") continue;
+          parsed.json[key] = value;
+        }
+      }
       if (mappedModel) {
         parsed.json.model = mappedModel;
       }
@@ -389,7 +393,7 @@ async function handlePriorityProxyRequest(ctx: {
   const { req, url, latch, config, model, bodyText } = ctx;
   const method = req.method;
   const pathWithQuery = url.pathname + url.search;
-  const maxAttempts = Math.min(config.strategy.maxRetriesPerRequest, latch.getRouteSize(model));
+  const maxAttempts = Math.max(config.strategy.maxRetriesPerRequest, latch.getRouteSize(model));
   const rejected = new Set<string>();
   const quotaRejected = new Set<string>();
   const networkFailures: string[] = [];
@@ -462,15 +466,13 @@ async function handlePriorityProxyRequest(ctx: {
       latch.advance(model, attempt, networkError);
     }
     attempts++;
-
-    if (attempts >= maxAttempts && networkError && quotaRejected.size === 0) {
-      console.error(`[Upstream Unreachable] ${networkFailures.join("; ")}`);
-      latch.finishRequest(model, rejected);
-      return unreachableResponse("all attempted upstream endpoints unreachable");
-    }
   }
 
   latch.finishRequest(model, rejected);
+  if (quotaRejected.size === 0 && networkFailures.length > 0) {
+    console.error(`[Upstream Unreachable] ${networkFailures.join("; ")}`);
+    return unreachableResponse("all attempted upstream endpoints unreachable");
+  }
   return new Response(
     JSON.stringify({
       error: {

@@ -7,8 +7,12 @@ let openCode1: ReturnType<typeof Bun.serve>;
 let openCode2: ReturnType<typeof Bun.serve>;
 let openCode3: ReturnType<typeof Bun.serve>;
 let commandCode: ReturnType<typeof Bun.serve>;
+let openRouter: ReturnType<typeof Bun.serve>;
 let commandHits = 0;
 let commandModel = "";
+let commandCodeStatus = 200;
+let openRouterHits = 0;
+let openRouterBody: Record<string, unknown> | undefined;
 let openCode1Status = 429;
 
 function quotaServer(
@@ -40,10 +44,24 @@ beforeAll(() => {
   commandCode = Bun.serve({
     port: 19104,
     async fetch(req) {
+      if (commandCodeStatus === 429) {
+        return Response.json(
+          { error: { message: "weekly usage limit", type: "insufficient_quota" } },
+          { status: 429 }
+        );
+      }
       commandHits++;
       const body = await req.json();
-      commandModel = body.model;
+      commandModel = body?.model;
       return Response.json({ choices: [{ message: { role: "assistant", content: "fallback" } }] });
+    },
+  });
+  openRouter = Bun.serve({
+    port: 19105,
+    async fetch(req) {
+      openRouterHits++;
+      openRouterBody = await req.json();
+      return Response.json({ choices: [{ message: { role: "assistant", content: "openrouter" } }] });
     },
   });
 });
@@ -53,6 +71,7 @@ afterAll(() => {
   openCode2.stop();
   openCode3.stop();
   commandCode.stop();
+  openRouter.stop();
 });
 
 function createConfig(): GatewayConfig {
@@ -207,7 +226,7 @@ describe("hierarchical priority routing", () => {
     }
   });
 
-  it("releases a half-open probe when the request attempt budget ends", async () => {
+  it("still reaches Command Code after a recovery probe even when the attempt budget is 1", async () => {
     let now = 0;
     const config = createConfig();
     const manager = new PriorityLatchManager(config, () => now);
@@ -215,8 +234,102 @@ describe("hierarchical priority routing", () => {
     expect((await postChat(manager, config)).status).toBe(200);
     now = 2 * 60 * 60 * 1000;
     config.strategy.maxRetriesPerRequest = 1;
-    expect((await postChat(manager, config)).status).toBe(429);
+    const response = await postChat(manager, config);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("X-Gateway-Active-Endpoint")).toBe("command-code");
     expect(manager.getStatus()).toMatchObject({ activePriority: 2, activeGroup: "command-code-fallback" });
     expect(manager.getStatus().endpoints.some((endpoint) => endpoint.circuitState === "half-open")).toBe(false);
+  });
+
+  it("retries Command Code on the same request after every circuit has opened", async () => {
+    const config = createConfig();
+    const manager = new PriorityLatchManager(config);
+    const model = "deepseek-v4-flash";
+
+    expect((await postChat(manager, config)).status).toBe(200);
+    const fallback = manager.getAttempt(model)!;
+    expect(fallback.endpoint.id).toBe("command-code");
+    manager.record429(model, fallback);
+    manager.advance(model, fallback, "429");
+
+    const response = await postChat(manager, config);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("X-Gateway-Active-Endpoint")).toBe("command-code");
+  });
+
+  it("walks OpenRouter after OpenCode and Command Code quota failures", async () => {
+    const config = createConfig();
+    config.endpoints.push({
+      id: "openrouter",
+      name: "OpenRouter (fast capped)",
+      baseUrl: "http://127.0.0.1:19105/v1",
+      apiKey: "or-key",
+      extraBody: {
+        model: "should-not-override-upstream-model",
+        response_format: { type: "json_object" },
+        provider: { sort: "throughput", max_price: { prompt: 0.15, completion: 0.60 } },
+      },
+    });
+    config.routing!.routes["deepseek-v4-flash"].groups.push({
+      id: "openrouter-fallback",
+      priority: 3,
+      mode: "latch",
+      members: [{ endpointId: "openrouter", upstreamModel: "deepseek/deepseek-v4.1-flash" }],
+    });
+    commandCodeStatus = 429;
+    openRouterHits = 0;
+    openRouterBody = undefined;
+    try {
+      const manager = new PriorityLatchManager(config);
+      const response = await postChat(manager, config);
+      expect(response.status).toBe(200);
+      expect(response.headers.get("X-Gateway-Active-Endpoint")).toBe("openrouter");
+      expect(openRouterHits).toBe(1);
+      expect(openRouterBody).toMatchObject({
+        model: "deepseek/deepseek-v4.1-flash",
+        provider: { sort: "throughput", max_price: { prompt: 0.15, completion: 0.60 } },
+      });
+      expect(openRouterBody).not.toHaveProperty("response_format");
+    } finally {
+      commandCodeStatus = 200;
+    }
+  });
+
+  it("does not treat a null JSON body as a network failure when extraBody is set", async () => {
+    const config = createConfig();
+    for (const endpoint of config.endpoints) {
+      endpoint.extraBody = { provider: { sort: "throughput" } };
+    }
+    const manager = new PriorityLatchManager(config);
+    const req = new Request("http://127.0.0.1:8080/v1/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "null",
+    });
+    const response = await handleProxyRequest({
+      req,
+      url: new URL(req.url),
+      latch: manager,
+      config,
+    });
+    expect(response.status).toBe(200);
+  });
+
+  it("returns 502 not 429 when every priority source is unreachable even if maxRetries exceeds route size", async () => {
+    const config = createConfig();
+    config.strategy.maxRetriesPerRequest = 10;
+    const manager = new PriorityLatchManager(config);
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      throw new Error("The socket connection was closed unexpectedly");
+    }) as unknown as typeof fetch;
+    try {
+      const response = await postChat(manager, config);
+      expect(response.status).toBe(502);
+      const body = await response.json();
+      expect(body.error.code).toBe("upstream_unreachable");
+    } finally {
+      globalThis.fetch = realFetch;
+    }
   });
 });

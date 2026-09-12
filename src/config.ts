@@ -36,6 +36,8 @@ interface RawEndpointConfig {
   models?: string[];
   modelMap?: Record<string, string>;
   model_map?: Record<string, string>;
+  extraBody?: Record<string, unknown>;
+  extra_body?: Record<string, unknown>;
   compat?: RawCompatConfig;
 }
 
@@ -84,6 +86,7 @@ function resolveEndpoint(raw: RawEndpointConfig, index: number): EndpointConfig 
     weight: raw.weight,
     models: raw.models,
     modelMap: raw.modelMap || raw.model_map,
+    extraBody: raw.extraBody || raw.extra_body,
     compat: resolveCompat(raw.compat),
   };
 }

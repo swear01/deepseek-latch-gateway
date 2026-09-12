@@ -102,7 +102,6 @@ export class PriorityLatchManager {
         now
       );
     }
-
     if (!state.recoveryProbeOwner && state.activeGroupIndex > 0) {
       const fallbackGroupIndex = state.activeGroupIndex;
       const recovered = this.findAttempt(model, state, 0, excluded, now, fallbackGroupIndex, false);
@@ -114,8 +113,10 @@ export class PriorityLatchManager {
         return recovered;
       }
     }
-
-    return this.findAttempt(model, state, state.activeGroupIndex, excluded, now);
+    const attempt = this.findAttempt(model, state, state.activeGroupIndex, excluded, now);
+    // Last resort: ignore open circuits so this request still walks remaining
+    // sources. Concurrent traffic during a half-open probe never reaches here.
+    return attempt ?? this.findAttempt(model, state, 0, excluded, now, state.route.groups.length, false, true);
   }
 
   private findAttempt(
@@ -125,7 +126,8 @@ export class PriorityLatchManager {
     excluded: Set<string>,
     now: number,
     endGroupIndex = state.route.groups.length,
-    useActiveMember = true
+    useActiveMember = true,
+    ignoreCircuit = false
   ): PriorityRouteAttempt | undefined {
     for (let groupIndex = startGroupIndex; groupIndex < endGroupIndex; groupIndex++) {
       const group = state.route.groups[groupIndex];
@@ -135,7 +137,7 @@ export class PriorityLatchManager {
       for (let memberIndex = firstMember; memberIndex < group.members.length; memberIndex++) {
         const attempt = this.createAttempt(model, state, groupIndex, memberIndex);
         const circuit = this.circuits.get(attempt.endpoint.id)!;
-        if (!excluded.has(attempt.key) && circuit.blockedUntil <= now) return attempt;
+        if (!excluded.has(attempt.key) && (ignoreCircuit || circuit.blockedUntil <= now)) return attempt;
       }
     }
     return undefined;
