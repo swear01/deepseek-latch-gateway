@@ -36,10 +36,15 @@ function isCloudflare1010OrWafBlock(status: number, bodyText: string): boolean {
   if (status !== 403) return false;
   const lower = bodyText.toLowerCase();
   return (
-    lower.includes("1010") ||
     lower.includes("error 1010") ||
     lower.includes("error code: 1010") ||
-    (lower.includes("cloudflare") && lower.includes("access denied"))
+    (lower.includes("cloudflare") && (lower.includes("1010") || lower.includes("access denied")))
+  );
+}
+
+function warnCloudflareBlock(endpointName: string, targetUrl: string, bodyText: string): void {
+  console.warn(
+    `\x1b[31m[Upstream 403 Blocked]\x1b[0m ${endpointName} (${targetUrl}) returned Cloudflare Error 1010: ${bodyText.slice(0, 150)}`
   );
 }
 
@@ -157,7 +162,7 @@ async function forwardToEndpoint(
   });
 
   headers.set("User-Agent", resolveUserAgent(req.headers.get("user-agent")));
-  if (method !== "GET" && method !== "HEAD" && !headers.has("content-type")) {
+  if (method !== "GET" && method !== "HEAD" && !headers.has("content-type") && parsed?.json) {
     headers.set("Content-Type", "application/json");
   }
 
@@ -489,9 +494,7 @@ async function handlePriorityProxyRequest(ctx: {
             break;
           }
           if (isCloudflare1010OrWafBlock(upstreamRes.status, errBody)) {
-            console.warn(
-              `\x1b[31m[Upstream 403 Blocked]\x1b[0m ${endpoint.name} (${targetUrl}) returned Cloudflare Error 1010: ${errBody.slice(0, 150)}`
-            );
+            warnCloudflareBlock(endpoint.name, targetUrl, errBody);
             networkError = "";
             rejected.add(attempt.key);
             networkFailures.push(`${endpoint.id}: Status 403 Cloudflare 1010 (${errBody.slice(0, 60)})`);
@@ -765,9 +768,7 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
             break;
           }
           if (isCloudflare1010OrWafBlock(upstreamRes.status, errBody)) {
-            console.warn(
-              `\x1b[31m[Upstream 403 Blocked]\x1b[0m ${endpoint.name} (${targetUrl}) returned Cloudflare Error 1010: ${errBody.slice(0, 150)}`
-            );
+            warnCloudflareBlock(endpoint.name, targetUrl, errBody);
             networkError = "";
             networkSkipped.add(currentIndex);
             networkFailures.push(`${endpoint.id}: Status 403 Cloudflare 1010 (${errBody.slice(0, 60)})`);
