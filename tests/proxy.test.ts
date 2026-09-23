@@ -918,11 +918,11 @@ describe("Proxy & Failover Integration", () => {
     }
   });
 
-  it("returns 502 when all endpoints return 403 endpoint block in flat RS-Latch", async () => {
+  it("returns 502 when all endpoints return 403 Cloudflare 1010 block in flat RS-Latch", async () => {
     const cf403Server = Bun.serve({
       port: 19099,
       fetch() {
-        return new Response("Forbidden", { status: 403 });
+        return new Response("<html><body>Error 1010 Access Denied</body></html>", { status: 403 });
       },
     });
 
@@ -969,6 +969,64 @@ describe("Proxy & Failover Integration", () => {
       expect(body.error.code).toBe("upstream_unreachable");
     } finally {
       cf403Server.stop();
+    }
+  });
+
+  it("relays ordinary non-1010 403 responses directly to the client without failover", async () => {
+    const permDeniedServer = Bun.serve({
+      port: 19097,
+      fetch() {
+        return Response.json(
+          { error: { message: "Permission denied for this key", type: "permission_error" } },
+          { status: 403 }
+        );
+      },
+    });
+
+    try {
+      const config: GatewayConfig = {
+        server: { host: "127.0.0.1", port: 8080, timeoutSeconds: 10 },
+        strategy: { mode: "latch", debounceSeconds: 0.01, maxRetriesPerRequest: 2 },
+        endpoints: [
+          {
+            id: "ep-perm-denied",
+            name: "Permission Denied Upstream",
+            baseUrl: "http://127.0.0.1:19097/v1",
+            apiKey: "sk-key-1",
+          },
+          {
+            id: "ep-healthy",
+            name: "Healthy Upstream",
+            baseUrl: "http://127.0.0.1:19002/v1",
+            apiKey: "sk-key-2",
+          },
+        ],
+        models: { aliases: {} },
+      };
+
+      const latch = new RSLatchManager(config);
+      const clientReq = new Request("http://127.0.0.1:8080/v1/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "deepseek-v4-flash",
+          messages: [{ role: "user", content: "Hello" }],
+        }),
+      });
+
+      const response = await handleProxyRequest({
+        req: clientReq,
+        url: new URL(clientReq.url),
+        latch,
+        config,
+      });
+
+      expect(response.status).toBe(403);
+      const body = await response.json();
+      expect(body.error.message).toBe("Permission denied for this key");
+      expect(latch.getActiveIndex()).toBe(0); // Latch was not flipped
+    } finally {
+      permDeniedServer.stop();
     }
   });
 });

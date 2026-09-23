@@ -32,11 +32,15 @@ function resolveUserAgent(rawUserAgent: string | null): string {
   return rawUserAgent;
 }
 
-function isEndpointBlockedOrFailure(status: number, bodyText: string, headers?: Headers): boolean {
-  if (status === 403) {
-    return true;
-  }
-  return false;
+function isCloudflare1010OrWafBlock(status: number, bodyText: string): boolean {
+  if (status !== 403) return false;
+  const lower = bodyText.toLowerCase();
+  return (
+    lower.includes("1010") ||
+    lower.includes("error 1010") ||
+    lower.includes("error code: 1010") ||
+    (lower.includes("cloudflare") && lower.includes("access denied"))
+  );
 }
 
 function isRateLimitOrQuotaError(status: number, bodyText: string): boolean {
@@ -484,16 +488,15 @@ async function handlePriorityProxyRequest(ctx: {
             latch.advance(model, attempt, errBody.slice(0, 100));
             break;
           }
-          if (isEndpointBlockedOrFailure(upstreamRes.status, errBody, upstreamRes.headers)) {
-            const is1010 = errBody.includes("1010") || upstreamRes.headers.has("cf-ray");
+          if (isCloudflare1010OrWafBlock(upstreamRes.status, errBody)) {
             console.warn(
-              `\x1b[31m[Upstream 403 Blocked]\x1b[0m ${endpoint.name} (${targetUrl}) returned status 403${is1010 ? " (Cloudflare 1010 / WAF Block)" : ""}: ${errBody.slice(0, 150)}`
+              `\x1b[31m[Upstream 403 Blocked]\x1b[0m ${endpoint.name} (${targetUrl}) returned Cloudflare Error 1010: ${errBody.slice(0, 150)}`
             );
             networkError = "";
             rejected.add(attempt.key);
-            networkFailures.push(`${endpoint.id}: Status 403 (${errBody.slice(0, 60)})`);
+            networkFailures.push(`${endpoint.id}: Status 403 Cloudflare 1010 (${errBody.slice(0, 60)})`);
             latch.recordNetworkFailure(model, attempt);
-            latch.advance(model, attempt, `Status 403: ${errBody.slice(0, 100)}`);
+            latch.advance(model, attempt, `Status 403 Cloudflare 1010: ${errBody.slice(0, 100)}`);
             break;
           }
           if (latch.isRecoveryProbe(model, attempt)) {
@@ -761,15 +764,14 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
             latch.trigger429(currentIndex, errBody.slice(0, 100));
             break;
           }
-          if (isEndpointBlockedOrFailure(upstreamRes.status, errBody, upstreamRes.headers)) {
-            const is1010 = errBody.includes("1010") || upstreamRes.headers.has("cf-ray");
+          if (isCloudflare1010OrWafBlock(upstreamRes.status, errBody)) {
             console.warn(
-              `\x1b[31m[Upstream 403 Blocked]\x1b[0m ${endpoint.name} (${targetUrl}) returned status 403${is1010 ? " (Cloudflare 1010 / WAF Block)" : ""}: ${errBody.slice(0, 150)}`
+              `\x1b[31m[Upstream 403 Blocked]\x1b[0m ${endpoint.name} (${targetUrl}) returned Cloudflare Error 1010: ${errBody.slice(0, 150)}`
             );
             networkError = "";
             networkSkipped.add(currentIndex);
-            networkFailures.push(`${endpoint.id}: Status 403 (${errBody.slice(0, 60)})`);
-            latch.advanceOnNetworkFailure(currentIndex, `Status 403: ${errBody.slice(0, 100)}`);
+            networkFailures.push(`${endpoint.id}: Status 403 Cloudflare 1010 (${errBody.slice(0, 60)})`);
+            latch.advanceOnNetworkFailure(currentIndex, `Status 403 Cloudflare 1010: ${errBody.slice(0, 100)}`);
             break;
           }
         }

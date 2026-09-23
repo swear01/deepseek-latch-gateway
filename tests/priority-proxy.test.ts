@@ -24,6 +24,12 @@ function quotaServer(
     port,
     fetch() {
       const responseStatus = status();
+      if (responseStatus === 403) {
+        return new Response("<html><body>Error 1010 Ray ID: 123 Access denied</body></html>", {
+          status: 403,
+          headers: { "Server": "cloudflare", "CF-RAY": "123" },
+        });
+      }
       return Response.json(
         responseStatus === 429
           ? { error: { message: "weekly usage limit", type: "insufficient_quota" } }
