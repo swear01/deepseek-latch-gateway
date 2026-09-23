@@ -15,6 +15,38 @@ interface ProxyRequestContext {
  * same-endpoint retry for transient network failures (see pool loop below).
  */
 const SAME_ENDPOINT_ATTEMPTS = 2;
+const DEFAULT_GATEWAY_USER_AGENT = "aisimpv-gateway/1.0";
+
+function resolveUserAgent(rawUserAgent: string | null): string {
+  if (!rawUserAgent) return DEFAULT_GATEWAY_USER_AGENT;
+  const lower = rawUserAgent.toLowerCase();
+  if (
+    lower.startsWith("python-urllib") ||
+    lower.startsWith("python-requests") ||
+    lower.startsWith("aiohttp") ||
+    lower.startsWith("httpx") ||
+    lower.startsWith("urllib")
+  ) {
+    return DEFAULT_GATEWAY_USER_AGENT;
+  }
+  return rawUserAgent;
+}
+
+function isCloudflare1010OrWafBlock(status: number, bodyText: string): boolean {
+  if (status !== 403) return false;
+  const lower = bodyText.toLowerCase();
+  return (
+    lower.includes("error 1010") ||
+    lower.includes("error code: 1010") ||
+    (lower.includes("cloudflare") && (lower.includes("1010") || lower.includes("access denied")))
+  );
+}
+
+function warnCloudflareBlock(endpointName: string, targetUrl: string, bodyText: string): void {
+  console.warn(
+    `\x1b[31m[Upstream 403 Blocked]\x1b[0m ${endpointName} (${targetUrl}) returned Cloudflare Error 1010: ${bodyText.slice(0, 150)}`
+  );
+}
 
 function isRateLimitOrQuotaError(status: number, bodyText: string): boolean {
   if (status === 429 || status === 402) {
@@ -118,11 +150,21 @@ async function forwardToEndpoint(
   const headers = new Headers();
   req.headers.forEach((val, key) => {
     const lowerKey = key.toLowerCase();
-    // Drop hop-by-hop headers and host
-    if (lowerKey !== "host" && lowerKey !== "authorization" && lowerKey !== "content-length") {
+    // Drop hop-by-hop headers, host, and user-agent (resolved explicitly below)
+    if (
+      lowerKey !== "host" &&
+      lowerKey !== "authorization" &&
+      lowerKey !== "content-length" &&
+      lowerKey !== "user-agent"
+    ) {
       headers.set(key, val);
     }
   });
+
+  headers.set("User-Agent", resolveUserAgent(req.headers.get("user-agent")));
+  if (method !== "GET" && method !== "HEAD" && !headers.has("content-type") && parsed?.json) {
+    headers.set("Content-Type", "application/json");
+  }
 
   headers.set("Authorization", `Bearer ${endpoint.apiKey}`);
   if (endpoint.extraHeaders) {
@@ -131,8 +173,18 @@ async function forwardToEndpoint(
     }
   }
 
-  if (new URL(targetUrl).hostname === "opencode.ai" && method === "POST") {
-    let sessionId = ["x-opencode-session", "x-deepseek-harness-session-id", "x-session-id", "x-session-affinity", "session_id"]
+  const targetHost = new URL(targetUrl).hostname;
+  const isOpenCode = targetHost === "opencode.ai" || targetHost.endsWith(".opencode.ai");
+  if (isOpenCode && method === "POST") {
+    let sessionId = [
+      "x-opencode-session",
+      "x-deepseek-harness-session-id",
+      "x-session-id",
+      "x-session-affinity",
+      "x-conversation-id",
+      "session_id",
+      "conversation_id",
+    ]
       .map((name) => req.headers.get(name)?.trim()).find(Boolean);
     if (!sessionId) {
       const body = parsed?.json;
@@ -441,6 +493,15 @@ async function handlePriorityProxyRequest(ctx: {
             latch.advance(model, attempt, errBody.slice(0, 100));
             break;
           }
+          if (isCloudflare1010OrWafBlock(upstreamRes.status, errBody)) {
+            warnCloudflareBlock(endpoint.name, targetUrl, errBody);
+            networkError = "";
+            rejected.add(attempt.key);
+            networkFailures.push(`${endpoint.id}: Status 403 Cloudflare 1010 (${errBody.slice(0, 60)})`);
+            latch.recordNetworkFailure(model, attempt);
+            latch.advance(model, attempt, `Status 403 Cloudflare 1010: ${errBody.slice(0, 100)}`);
+            break;
+          }
           if (latch.isRecoveryProbe(model, attempt)) {
             networkError = "";
             rejected.add(attempt.key);
@@ -706,6 +767,14 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
             latch.trigger429(currentIndex, errBody.slice(0, 100));
             break;
           }
+          if (isCloudflare1010OrWafBlock(upstreamRes.status, errBody)) {
+            warnCloudflareBlock(endpoint.name, targetUrl, errBody);
+            networkError = "";
+            networkSkipped.add(currentIndex);
+            networkFailures.push(`${endpoint.id}: Status 403 Cloudflare 1010 (${errBody.slice(0, 60)})`);
+            latch.advanceOnNetworkFailure(currentIndex, `Status 403 Cloudflare 1010: ${errBody.slice(0, 100)}`);
+            break;
+          }
         }
 
         // Success or standard client error (e.g. 400 bad prompt)
@@ -735,7 +804,7 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
     }
     attempts++;
 
-    if (attempts >= maxRetries && networkError && quotaRejected.size === 0) {
+    if (attempts >= maxRetries && (networkError || networkSkipped.size > 0) && quotaRejected.size === 0) {
       // If the final endpoint was unreachable AND no endpoint ever gave a
       // definitive 429/quota verdict, report the connectivity failure (502).
       // A definitive quota verdict always wins (429).

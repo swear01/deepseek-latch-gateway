@@ -24,6 +24,12 @@ function quotaServer(
     port,
     fetch() {
       const responseStatus = status();
+      if (responseStatus === 403) {
+        return new Response("<html><body>Error 1010 Ray ID: 123 Access denied</body></html>", {
+          status: 403,
+          headers: { "Server": "cloudflare", "CF-RAY": "123" },
+        });
+      }
       return Response.json(
         responseStatus === 429
           ? { error: { message: "weekly usage limit", type: "insufficient_quota" } }
@@ -332,4 +338,22 @@ describe("hierarchical priority routing", () => {
       globalThis.fetch = realFetch;
     }
   });
+
+  it("fails over on HTTP 403 Cloudflare 1010 block to the next provider and puts endpoint in cooldown", async () => {
+    openCode1Status = 403;
+    const config = createConfig();
+    const manager = new PriorityLatchManager(config);
+
+    try {
+      const response = await postChat(manager, config);
+      expect(response.status).toBe(200);
+      expect(response.headers.get("X-Gateway-Active-Endpoint")).toBe("command-code");
+      const key1 = manager.getStatus().endpoints.find((ep) => ep.id === "opencode-go-1")!;
+      expect(key1.circuitState).toBe("open");
+      expect(key1.consecutiveFailures).toBe(1);
+    } finally {
+      openCode1Status = 429;
+    }
+  });
 });
+
