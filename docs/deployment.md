@@ -88,30 +88,32 @@ DPAPI credentials。不要切換成登入使用者的臨時程序。
 
 ## 驗證邊界與最新部署紀錄
 
-2026-09-12 已部署 PR #14 合併提交 `9507d17`（fix head `9addc3d`）至
-Mac、四台 NFS、Oracle、Zeus。priority 只決定嘗試順序：同一 request 會走完
-route 上剩餘 source，circuit 全開時仍 last-resort 再打一次；`extra_body`
-會轉給上游，且不能覆寫 `model` / `response_format`。live `deepseek-flash`
-補上 OpenRouter（`upstream_model: deepseek/deepseek-v4.1-flash`），OpenRouter
-`max_price` 改為 prompt `0.15` / completion `0.60`。55 tests、typecheck、
-四平台建置通過；七台 Linux/Mac 的磁碟與 `/proc/<pid>/exe`（Mac 為新 PID +
-已簽章 binary）SHA-256 吻合。真實 `deepseek-flash` 推論皆 HTTP 200，
-`X-Gateway-Active-Endpoint: command-code`（多數 `X-Gateway-Attempt: 4`，
-Oracle 因重啟後既有 loopback 流量已 latch 到 Command Code 而為 1）。這證明
-Go 額度用盡後會落到 Command Code，不證明 OpenCode 上游推論成功，也不證明
-OpenRouter 已被這次流量打到（CC 成功所以沒有走到第三組）。
+2026-09-23 已部署 PR #16 合併提交 `9861158`（fix head `0b62f76`）至
+Mac、四台 NFS（mazu、athena、cthulhu、valkyrie）、Oracle、Zeus（swear02）。
+本次修復當 client 端送出 `Python-urllib` 或 generic library User-Agent
+時，Cloudflare 於 API key 驗證前阻擋引發 HTTP 403 / Error 1010，且 gateway
+未 failover 卡死在 opencode-go-1 的問題：
+1. Outbound 預設帶上 `User-Agent: aisimpv-gateway/1.0`，正規化缺失或 generic 函式庫
+   User-Agent（如 `python-urllib/*`、`python-requests/*` 等），同時保留自定義 agent
+   User-Agent 與 endpoint 自訂 `extraHeaders`。
+2. 保持穩定 session identifiers（`x-opencode-session`），支援 `x-conversation-id` 與 `conversation_id`。
+3. 對帶有 JSON body 之 request 自動確保帶上 `Content-Type: application/json`。
+4. 將 Cloudflare 1010 / WAF 封鎖視為 endpoint 失敗：記錄 warning，進入暫時 cooldown（基礎 30 秒 backoff），並立即 failover 至下一組 provider/endpoint。
 
 SHA-256（Mac 為簽章後）：
 
-- Mac arm64 `c3969b520371f37a404e6f4184630e0c7682dd5102f29e32918fd1240b26d673`
-- Linux x64 `37bf5804cd519d836575ad76fa2304a150034df9dc6fe87fa346fda52bb7d803`
-- Linux ARM64 `ec299ae32680110c6b91e2d2179f9bbd5ffbed04b71383792cb3262d725c5a91`
-- Windows x64 `e5b960e10bae928ab12b0de957fc9da334d3df9fa898947ac85a0107198c40b7`（已建置，未安裝）
+- Mac arm64 `725ab7956b7aadc873aac54d7206537431d736a05254b83a3e27815960ac5cc1`
+- Linux x64 `a99874c9cc6ff47b00c4c18fd6efeb1c49a47d341e91653e7c72373cd57e79f8`
+- Linux ARM64 `1a02f1eee445c08fc2a419d55404cfc4464a6a56bc82f38b9e1b3852976eeba3`
+- Windows x64 `09132180fb53a08999ef22a0ae282155c0080eda0847faca2c2711f7f3731a37`（已建置，未安裝）
 
-swop 未部署：舊區網 SSH 不通、mDNS 無 `Swear01_PC`、現行 HAPI machine 列表
-只有七台且沒有 swop。Windows exe 已建置但未安裝；找到主機前不要當成已上線。
+驗證紀錄：
+- 61 tests、typecheck、四平台建置通過。
+- 七台 Linux/Mac 的磁碟與 `/proc/<pid>/exe`（Mac 為 LaunchAgent 新 PID + 已簽章 binary）SHA-256 吻合。
+- 各機以 `User-Agent: Python-urllib/3.14` 進行真實 `deepseek-flash` 推論測試，皆成功穿透 Cloudflare，HTTP 200 回應於 `opencode-go-1`（`X-Gateway-Attempt: 1`）。
+- swop 未部署：Windows exe 已建置但主機目前離線未安裝。
 
-先前 2026-09-11 的 PR #12 / `4fa6687` CreditsError classifier rollout
+先前 2026-09-12 的 PR #14 / `9507d17` priority exhaust 與 OpenRouter fallback rollout、
 與 2026-09-07 的 PR #10 / `73f0fb5` 八台 session-header rollout 仍是該
 契約的基準；本次同時換 binary 與 live routing/config。
 
