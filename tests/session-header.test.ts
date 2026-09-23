@@ -79,3 +79,24 @@ it("rejects requests with neither identity nor opening and leaves other provider
   expect((await send({}, {}, cfg)).status).toBe(200);
   expect(captured[0].has("x-opencode-session")).toBe(false);
 });
+
+it("normalizes generic User-Agent headers like Python-urllib to aisimpv-gateway/1.0", async () => {
+  capture();
+  await send({ input: "Hello" }, { "user-agent": "Python-urllib/3.14" });
+  expect(captured.at(-1)?.get("user-agent")).toBe("aisimpv-gateway/1.0");
+
+  await send({ input: "Hello" }, {});
+  expect(captured.at(-1)?.get("user-agent")).toBe("aisimpv-gateway/1.0");
+
+  await send({ input: "Hello" }, { "user-agent": "custom-agent/2.0" });
+  expect(captured.at(-1)?.get("user-agent")).toBe("custom-agent/2.0");
+});
+
+it("translates x-conversation-id and conversation_id to x-opencode-session", async () => {
+  capture();
+  for (const header of ["x-conversation-id", "conversation_id"]) {
+    await send({}, { [header]: "conv-99" });
+    expect(captured.at(-1)?.get("x-opencode-session")).toBe("conv-99");
+  }
+});
+

@@ -113,3 +113,13 @@ the service is running. Truncating the mapped executable can trigger SIGBUS and
 an auto-restart may execute the partially written file. Stage the complete
 binary in `/tmp`, set its mode, then use `mv` to replace the path atomically
 before restarting the service.
+
+### 16. Outbound User-Agent normalization and 403 endpoint block failover
+
+OpenCode Go / Cloudflare blocks requests with generic library User-Agents such as
+`Python-urllib/*` with HTTP 403 / Cloudflare Error 1010. The gateway normalizes
+missing or generic library User-Agents to `aisimpv-gateway/1.0`, while preserving
+explicit custom agent User-Agents. In addition, HTTP 403 / Cloudflare 1010 is
+classified as an endpoint failure, placing the failed endpoint into temporary
+cooldown (30-second base backoff) and immediately failing over to the next
+provider instead of aborting the request.

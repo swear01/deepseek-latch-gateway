@@ -860,4 +860,116 @@ describe("Proxy & Failover Integration", () => {
     expect(response.headers.get("X-Gateway-Attempt")).toBe("2");
     expect(latch.getActiveIndex()).toBe(0); // global latch state unchanged (debounced)
   });
+
+  it("automatically fails over from Key 1 (403 Cloudflare Error 1010) to Key 2 (200) in flat RS-Latch", async () => {
+    const cf403Server = Bun.serve({
+      port: 19098,
+      fetch() {
+        return new Response("<html><body>Error 1010 Ray ID: 12345 Access denied</body></html>", {
+          status: 403,
+          headers: { "Server": "cloudflare", "CF-RAY": "12345" },
+        });
+      },
+    });
+
+    try {
+      const config: GatewayConfig = {
+        server: { host: "127.0.0.1", port: 8080, timeoutSeconds: 10 },
+        strategy: { mode: "latch", debounceSeconds: 0.01, maxRetriesPerRequest: 2 },
+        endpoints: [
+          {
+            id: "ep-cf-403",
+            name: "Cloudflare 403 Upstream",
+            baseUrl: "http://127.0.0.1:19098/v1",
+            apiKey: "sk-key-1",
+          },
+          {
+            id: "ep-healthy",
+            name: "Healthy Upstream",
+            baseUrl: "http://127.0.0.1:19002/v1",
+            apiKey: "sk-key-2",
+          },
+        ],
+        models: { aliases: {} },
+      };
+
+      const latch = new RSLatchManager(config);
+      const clientReq = new Request("http://127.0.0.1:8080/v1/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "deepseek-v4-flash",
+          messages: [{ role: "user", content: "Hello" }],
+        }),
+      });
+
+      const response = await handleProxyRequest({
+        req: clientReq,
+        url: new URL(clientReq.url),
+        latch,
+        config,
+      });
+
+      expect(response.status).toBe(200);
+      expect(response.headers.get("X-Gateway-Active-Endpoint")).toBe("ep-healthy");
+      expect(response.headers.get("X-Gateway-Attempt")).toBe("2");
+    } finally {
+      cf403Server.stop();
+    }
+  });
+
+  it("returns 502 when all endpoints return 403 endpoint block in flat RS-Latch", async () => {
+    const cf403Server = Bun.serve({
+      port: 19099,
+      fetch() {
+        return new Response("Forbidden", { status: 403 });
+      },
+    });
+
+    try {
+      const config: GatewayConfig = {
+        server: { host: "127.0.0.1", port: 8080, timeoutSeconds: 10 },
+        strategy: { mode: "latch", debounceSeconds: 0.01, maxRetriesPerRequest: 2 },
+        endpoints: [
+          {
+            id: "ep-cf-1",
+            name: "Cloudflare 403 Upstream 1",
+            baseUrl: "http://127.0.0.1:19099/v1",
+            apiKey: "sk-key-1",
+          },
+          {
+            id: "ep-cf-2",
+            name: "Cloudflare 403 Upstream 2",
+            baseUrl: "http://127.0.0.1:19099/v1",
+            apiKey: "sk-key-2",
+          },
+        ],
+        models: { aliases: {} },
+      };
+
+      const latch = new RSLatchManager(config);
+      const clientReq = new Request("http://127.0.0.1:8080/v1/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "deepseek-v4-flash",
+          messages: [{ role: "user", content: "Hello" }],
+        }),
+      });
+
+      const response = await handleProxyRequest({
+        req: clientReq,
+        url: new URL(clientReq.url),
+        latch,
+        config,
+      });
+
+      expect(response.status).toBe(502);
+      const body = await response.json();
+      expect(body.error.code).toBe("upstream_unreachable");
+    } finally {
+      cf403Server.stop();
+    }
+  });
 });
+

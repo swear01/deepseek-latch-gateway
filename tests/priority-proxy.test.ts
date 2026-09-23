@@ -332,4 +332,22 @@ describe("hierarchical priority routing", () => {
       globalThis.fetch = realFetch;
     }
   });
+
+  it("fails over on HTTP 403 Cloudflare 1010 block to the next provider and puts endpoint in cooldown", async () => {
+    openCode1Status = 403;
+    const config = createConfig();
+    const manager = new PriorityLatchManager(config);
+
+    try {
+      const response = await postChat(manager, config);
+      expect(response.status).toBe(200);
+      expect(response.headers.get("X-Gateway-Active-Endpoint")).toBe("command-code");
+      const key1 = manager.getStatus().endpoints.find((ep) => ep.id === "opencode-go-1")!;
+      expect(key1.circuitState).toBe("open");
+      expect(key1.consecutiveFailures).toBe(1);
+    } finally {
+      openCode1Status = 429;
+    }
+  });
 });
+
