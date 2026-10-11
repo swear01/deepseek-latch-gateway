@@ -88,6 +88,19 @@ DPAPI credentials。不要切換成登入使用者的臨時程序。
 
 ## 驗證邊界與最新部署紀錄
 
+2026-10-12（台灣時間）在 Oracle 部署 subscription-403 修復程式
+`1a07a91`：OpenCode Go 帳號 1 回 monthly quota 429、帳號 2 回訂閱失效
+403 時，Gateway 繼續嘗試帳號 3。候選 port 35011 與正式 port 35001 均
+實測 HTTP 200、`X-Gateway-Active-Endpoint: opencode-go-3`、
+`X-Gateway-Attempt: 3`，模型完整回答 `OK`。
+
+- 65 tests、typecheck、四平台建置及 Mac 簽章驗證通過。
+- Oracle 正式磁碟檔案與新程序 `/proc/1112807/exe` 的 SHA-256 均為
+  `2d82b6a680444f46847cdbe6c4447e7d25b812b1a8a8ccfa56e39321cc288691`。
+- config、routing、launcher、systemd unit hash 保持一致；舊 binary 已備份。
+  Swear Review 程序保持 PID 4173895，沒有重啟。
+- 本次只部署故障所在的 Oracle；其餘七台未更新，仍以先前部署紀錄為準。
+
 2026-09-23 已部署 PR #16 合併提交 `9861158`（fix head `0b62f76`）至
 Mac、四台 NFS（mazu、athena、cthulhu、valkyrie）、Oracle、Zeus（swear02）。
 本次修復當 client 端送出 `Python-urllib` 或 generic library User-Agent
