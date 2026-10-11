@@ -64,7 +64,8 @@ function isRateLimitOrQuotaError(status: number, bodyText: string): boolean {
     lower.includes("weekly usage limit") ||
     lower.includes("regionerror") ||
     lower.includes("creditserror") ||
-    lower.includes("insufficient balance")
+    lower.includes("insufficient balance") ||
+    (status === 403 && lower.includes("an active opencode go subscription is required to use go models"))
   ) {
     return true;
   }

@@ -55,6 +55,7 @@ Group and member names are trimmed, duplicate group IDs and conflicting
 
 - `max_retries_per_request` is a floor, not a ceiling, on priority-route attempts: a request always walks every remaining route member in priority order. Circuit cooldown only skips a source when a later unblocked source exists. Each endpoint attempt includes one same-endpoint retry for transient network failures.
 - A definitive quota response advances the current group; two network failures skip that endpoint for the current request without counting as a 429.
+- OpenCode's HTTP 403 requiring an active Go subscription also advances to the next configured account and uses the quota cooldown. Other permission errors remain unchanged.
 - Quota cooldown starts at 1.5 hours and doubles to 3, 6, 12, then at most 24 hours; a shorter upstream `Retry-After` can accelerate recovery but never extend that schedule.
 - While a recovery probe is in flight, concurrent requests continue on the fallback. A successful probe immediately restores the higher-priority route.
 - `X-Gateway-Attempt` reports cumulative upstream fetch calls, including same-endpoint retries.

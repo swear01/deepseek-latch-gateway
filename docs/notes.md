@@ -72,6 +72,12 @@ balance..."}}`). That is also quota. The classifier matches `creditserror` and
 `insufficient balance` so the request latches instead of forwarding 401. A
 plain 401 without those strings is still treated as a normal client error.
 
+An inactive Go subscription returns HTTP **403** with `An active OpenCode Go
+subscription is required to use Go models.` The shared classifier recognizes
+that specific message and advances to the next configured account with the
+quota cooldown, in both priority and flat routing. Ordinary permission-denied
+403 responses still reach the client without switching accounts.
+
 ### 11. Provider and routing configuration are separate
 
 `config.yaml` defines provider endpoints and compatibility behavior. `routing.yaml`
