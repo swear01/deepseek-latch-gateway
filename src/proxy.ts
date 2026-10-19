@@ -42,16 +42,19 @@ function isCloudflare1010OrWafBlock(status: number, bodyText: string): boolean {
   );
 }
 
-function redactCredentials(text: string): string {
-  return text
+function redactCredentials(text: string, apiKey: string): string {
+  const withoutKey = apiKey.length >= 8 ? text.split(apiKey).join("[redacted]") : text;
+  return withoutKey
     .replace(/\b(?:oc_sk|sk|rk|pk|key|token)[-_][A-Za-z0-9_-]{8,}/gi, "[redacted]")
     .replace(/\bBearer\s+\S+/gi, "Bearer [redacted]");
 }
 
-function warnAuthFailure(endpointName: string, targetUrl: string, bodyText: string): void {
+function reportAuthFailure(endpoint: EndpointConfig, targetUrl: string, bodyText: string): string {
+  const safeBody = redactCredentials(bodyText, endpoint.apiKey);
   console.warn(
-    `\x1b[31m[Upstream 401 Auth]\x1b[0m ${endpointName} (${targetUrl}) rejected its credential: ${bodyText.slice(0, 150)}`
+    `\x1b[31m[Upstream 401 Auth]\x1b[0m ${endpoint.name} (${targetUrl}) rejected its credential: ${safeBody.slice(0, 150)}`
   );
+  return safeBody;
 }
 
 function warnCloudflareBlock(endpointName: string, targetUrl: string, bodyText: string): void {
@@ -479,6 +482,7 @@ async function handlePriorityProxyRequest(ctx: {
   const quotaRejected = new Set<string>();
   const networkFailures: string[] = [];
   let authFailures = 0;
+  let sawNonAuthFailure = false;
   let attempts = 0;
   let fetchCalls = 0;
 
@@ -526,6 +530,7 @@ async function handlePriorityProxyRequest(ctx: {
           if (isCloudflare1010OrWafBlock(upstreamRes.status, errBody)) {
             warnCloudflareBlock(endpoint.name, targetUrl, errBody);
             networkError = "";
+            sawNonAuthFailure = true;
             rejected.add(attempt.key);
             networkFailures.push(`${endpoint.id}: Status 403 Cloudflare 1010 (${errBody.slice(0, 60)})`);
             latch.recordNetworkFailure(model, attempt);
@@ -533,8 +538,7 @@ async function handlePriorityProxyRequest(ctx: {
             break;
           }
           if (upstreamRes.status === 401) {
-            const safeBody = redactCredentials(errBody);
-            warnAuthFailure(endpoint.name, targetUrl, safeBody);
+            const safeBody = reportAuthFailure(endpoint, targetUrl, errBody);
             networkError = "";
             rejected.add(attempt.key);
             authFailures++;
@@ -545,6 +549,7 @@ async function handlePriorityProxyRequest(ctx: {
           }
           if (latch.isRecoveryProbe(model, attempt)) {
             networkError = "";
+            sawNonAuthFailure = true;
             rejected.add(attempt.key);
             latch.recordNetworkFailure(model, attempt);
             latch.advance(model, attempt, `Status ${upstreamRes.status}: ${errBody.slice(0, 100)}`);
@@ -562,6 +567,7 @@ async function handlePriorityProxyRequest(ctx: {
     }
 
     if (networkError) {
+      sawNonAuthFailure = true;
       rejected.add(attempt.key);
       networkFailures.push(`${endpoint.id}: ${networkError}`);
       latch.recordNetworkFailure(model, attempt);
@@ -572,8 +578,11 @@ async function handlePriorityProxyRequest(ctx: {
 
   latch.finishRequest(model, rejected);
   if (quotaRejected.size === 0 && networkFailures.length > 0) {
+    if (authFailures > 0 && !sawNonAuthFailure) {
+      console.error(`[Upstream Auth Failed] ${networkFailures.join("; ")}`);
+      return authFailedResponse();
+    }
     console.error(`[Upstream Unreachable] ${networkFailures.join("; ")}`);
-    if (authFailures === networkFailures.length) return authFailedResponse();
     return unreachableResponse("all attempted upstream endpoints unreachable");
   }
   return new Response(
@@ -722,7 +731,8 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
           if (isRateLimitOrQuotaError(upstreamRes.status, errBody)) {
             latch.record429For(dedicated.id, `Status ${upstreamRes.status}`);
           } else if (upstreamRes.status === 401) {
-            warnAuthFailure(dedicated.name, targetUrl, redactCredentials(errBody));
+            reportAuthFailure(dedicated, targetUrl, errBody);
+            return authFailedResponse();
           }
         }
         return await forwardUpstreamResponse(upstreamRes, dedicated, 1);
@@ -746,6 +756,7 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
   // Aggregated `endpoint: error` summaries for the final 502 (if any).
   const networkFailures: string[] = [];
   let authFailures = 0;
+  let sawNonAuthFailure = false;
   // Invariant: every loop iteration below adds at least one index to a skip
   // set (or returns), and maxRetries <= poolSize, so at least one un-skipped
   // endpoint always exists when the advance loop runs.
@@ -818,14 +829,14 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
           if (isCloudflare1010OrWafBlock(upstreamRes.status, errBody)) {
             warnCloudflareBlock(endpoint.name, targetUrl, errBody);
             networkError = "";
+            sawNonAuthFailure = true;
             networkSkipped.add(currentIndex);
             networkFailures.push(`${endpoint.id}: Status 403 Cloudflare 1010 (${errBody.slice(0, 60)})`);
             latch.advanceOnNetworkFailure(currentIndex, `Status 403 Cloudflare 1010: ${errBody.slice(0, 100)}`);
             break;
           }
           if (upstreamRes.status === 401) {
-            const safeBody = redactCredentials(errBody);
-            warnAuthFailure(endpoint.name, targetUrl, safeBody);
+            const safeBody = reportAuthFailure(endpoint, targetUrl, errBody);
             networkError = "";
             networkSkipped.add(currentIndex);
             authFailures++;
@@ -856,6 +867,7 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
       // The endpoint failed on both attempts: it is plausibly down, not just
       // hiccuping — skip it for the rest of this request and advance the latch
       // (debounced) so subsequent requests start from the next endpoint.
+      sawNonAuthFailure = true;
       networkFailures.push(`${endpoint.id}: ${networkError}`);
       networkSkipped.add(currentIndex);
       latch.advanceOnNetworkFailure(currentIndex, networkError);
@@ -868,8 +880,11 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
       // A definitive quota verdict always wins (429).
       // Detailed per-endpoint failures stay server-side: the client only
       // needs a generic connectivity error, not the pool topology.
+      if (authFailures > 0 && !sawNonAuthFailure) {
+        console.error(`[Upstream Auth Failed] ${networkFailures.join("; ")}`);
+        return authFailedResponse();
+      }
       console.error(`[Upstream Unreachable] ${networkFailures.join("; ")}`);
-      if (authFailures === networkFailures.length) return authFailedResponse();
       return unreachableResponse("all attempted upstream endpoints unreachable");
     }
     // Otherwise fall through to the 429 response below (loop exits naturally).
