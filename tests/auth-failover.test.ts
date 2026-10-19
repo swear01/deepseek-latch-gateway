@@ -11,7 +11,7 @@ function expiredBody(index: number) {
     error: {
       type: "authentication_error",
       code: "api_key_expired",
-      message: `Key ${apiKey(index)} has expired (oc_sk_echoedSecretValue123).`,
+      message: `Key ${apiKey(index)} has expired (oc_sk_echoedSecretValue123), reason token_not_supported.`,
     },
   };
 }
@@ -27,10 +27,11 @@ function captureConsole() {
 function expectNoSecrets(text: string) {
   expect(text).not.toContain("echoedSecretValue");
   expect(text).not.toContain("plain-configured-secret");
+  expect(text).not.toContain("clientQuerySecret");
 }
 
-function chatRequest(model: string) {
-  return new Request("http://localhost/v1/chat/completions", {
+function chatRequest(model: string, query = "") {
+  return new Request(`http://localhost/v1/chat/completions${query}`, {
     method: "POST",
     headers: { "Content-Type": "application/json", "x-opencode-session": "auth-test" },
     body: JSON.stringify({ model, messages: [] }),
@@ -90,7 +91,7 @@ for (const Manager of [PriorityLatchManager, RSLatchManager]) {
           expect(response.headers.get("X-Gateway-Active-Endpoint")).toBe("opencode-go-2");
           expect(body.choices[0].message.content).toBe("OK");
         }
-        expect(output.logged.some(line => line.includes("Upstream 401 Auth"))).toBe(true);
+        expect(output.logged.some(line => line.includes("Upstream 401 Auth") && line.includes("token_not_supported"))).toBe(true);
         expectNoSecrets(output.logged.join("\n"));
       } finally {
         output.restore();
@@ -113,12 +114,13 @@ it("dedicated endpoint hides a rejected credential from the client", async () =>
       ],
     };
     const latch = new RSLatchManager(config);
-    const req = chatRequest("dedicated-model");
+    const req = chatRequest("dedicated-model", "?key=clientQuerySecret9");
     const response = await handleProxyRequest({ req, url: new URL(req.url), latch, config });
     const text = await response.text();
     expect(response.status).toBe(502);
     expect(JSON.parse(text).error.code).toBe("upstream_auth_failed");
     expect(response.headers.get("X-Gateway-Attempt")).toBe("1");
+    expect(response.headers.get("X-Gateway-Active-Endpoint")).toBe("dedicated");
     expectNoSecrets(text);
     expectNoSecrets(output.logged.join("\n"));
   } finally {

@@ -45,15 +45,20 @@ function isCloudflare1010OrWafBlock(status: number, bodyText: string): boolean {
 function redactCredentials(text: string, apiKey: string): string {
   const withoutKey = apiKey.length >= 8 ? text.split(apiKey).join("[redacted]") : text;
   return withoutKey
-    .replace(/\b(?:oc_sk|sk|rk|pk|key|token)[-_][A-Za-z0-9_-]{8,}/gi, "[redacted]")
+    .replace(/\b(?:oc_sk|sk|rk|pk|key|token)[-_][A-Za-z0-9_-]*\d[A-Za-z0-9_-]*/gi, "[redacted]")
     .replace(/\bBearer\s+\S+/gi, "Bearer [redacted]");
+}
+
+function withoutQuery(url: string): string {
+  const queryStart = url.indexOf("?");
+  return queryStart === -1 ? url : `${url.slice(0, queryStart)}?[redacted]`;
 }
 
 function reportAuthFailure(endpoint: EndpointConfig, targetUrl: string, upstreamRes: Response, bodyText: string): string {
   void upstreamRes.body?.cancel().catch(() => {});
   const safeBody = redactCredentials(bodyText, endpoint.apiKey);
   console.warn(
-    `\x1b[31m[Upstream 401 Auth]\x1b[0m ${endpoint.name} (${targetUrl}) rejected its credential: ${safeBody.slice(0, 150)}`
+    `\x1b[31m[Upstream 401 Auth]\x1b[0m ${endpoint.name} (${withoutQuery(targetUrl)}) rejected its credential: ${safeBody.slice(0, 150)}`
   );
   return safeBody;
 }
@@ -435,7 +440,9 @@ async function forwardUpstreamResponse(
   return new Response(upstreamRes.body, { status, statusText, headers });
 }
 
-function authFailedResponse(upstreamCalls: number): Response {
+function authFailedResponse(upstreamCalls: number, endpointId?: string): Response {
+  const headers: Record<string, string> = { "Content-Type": "application/json", "X-Gateway-Attempt": String(upstreamCalls) };
+  if (endpointId) headers["X-Gateway-Active-Endpoint"] = endpointId;
   return new Response(
     JSON.stringify({
       error: {
@@ -446,7 +453,7 @@ function authFailedResponse(upstreamCalls: number): Response {
     }),
     {
       status: 502,
-      headers: { "Content-Type": "application/json", "X-Gateway-Attempt": String(upstreamCalls) },
+      headers,
     }
   );
 }
@@ -733,7 +740,7 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
             latch.record429For(dedicated.id, `Status ${upstreamRes.status}`);
           } else if (upstreamRes.status === 401) {
             reportAuthFailure(dedicated, targetUrl, upstreamRes, errBody);
-            return authFailedResponse(1);
+            return authFailedResponse(1, dedicated.id);
           }
         }
         return await forwardUpstreamResponse(upstreamRes, dedicated, 1);
