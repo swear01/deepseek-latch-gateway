@@ -69,7 +69,8 @@ observed at weekly limit while key 2 stayed healthy.
 Zen **balance** exhaustion is a different shape: HTTP **401**
 (`{"type":"error","error":{"type":"CreditsError","message":"Insufficient
 balance..."}}`). That is also quota. The classifier matches `creditserror` and
-`insufficient balance` so the request latches instead of forwarding 401. Any
+`insufficient balance` so the request latches instead of forwarding 401; a 401
+carrying any other quota marker the classifier knows takes the same path. Any
 other 401 (for example `api_key_expired` after the October 2026 OpenCode key
 revocation) is treated as an endpoint failure, not quota: the endpoint is
 skipped without a quota cooldown and the request moves to the next member.
