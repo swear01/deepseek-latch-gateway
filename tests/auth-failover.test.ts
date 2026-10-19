@@ -85,6 +85,7 @@ for (const Manager of [PriorityLatchManager, RSLatchManager]) {
         const body = await response.json();
         if (code) {
           expect(body.error.code).toBe(code);
+          if (code === "upstream_auth_failed") expect(response.headers.get("X-Gateway-Attempt")).toBe("2");
         } else {
           expect(response.headers.get("X-Gateway-Active-Endpoint")).toBe("opencode-go-2");
           expect(body.choices[0].message.content).toBe("OK");
@@ -117,6 +118,7 @@ it("dedicated endpoint hides a rejected credential from the client", async () =>
     const text = await response.text();
     expect(response.status).toBe(502);
     expect(JSON.parse(text).error.code).toBe("upstream_auth_failed");
+    expect(response.headers.get("X-Gateway-Attempt")).toBe("1");
     expectNoSecrets(text);
     expectNoSecrets(output.logged.join("\n"));
   } finally {

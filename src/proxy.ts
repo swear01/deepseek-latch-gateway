@@ -434,7 +434,7 @@ async function forwardUpstreamResponse(
   return new Response(upstreamRes.body, { status, statusText, headers });
 }
 
-function authFailedResponse(): Response {
+function authFailedResponse(upstreamCalls: number): Response {
   return new Response(
     JSON.stringify({
       error: {
@@ -445,7 +445,7 @@ function authFailedResponse(): Response {
     }),
     {
       status: 502,
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "X-Gateway-Attempt": String(upstreamCalls) },
     }
   );
 }
@@ -580,7 +580,7 @@ async function handlePriorityProxyRequest(ctx: {
   if (quotaRejected.size === 0 && networkFailures.length > 0) {
     if (authFailures > 0 && !sawNonAuthFailure) {
       console.error(`[Upstream Auth Failed] ${networkFailures.join("; ")}`);
-      return authFailedResponse();
+      return authFailedResponse(fetchCalls);
     }
     console.error(`[Upstream Unreachable] ${networkFailures.join("; ")}`);
     return unreachableResponse("all attempted upstream endpoints unreachable");
@@ -732,7 +732,7 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
             latch.record429For(dedicated.id, `Status ${upstreamRes.status}`);
           } else if (upstreamRes.status === 401) {
             reportAuthFailure(dedicated, targetUrl, errBody);
-            return authFailedResponse();
+            return authFailedResponse(1);
           }
         }
         return await forwardUpstreamResponse(upstreamRes, dedicated, 1);
@@ -882,7 +882,7 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
       // needs a generic connectivity error, not the pool topology.
       if (authFailures > 0 && !sawNonAuthFailure) {
         console.error(`[Upstream Auth Failed] ${networkFailures.join("; ")}`);
-        return authFailedResponse();
+        return authFailedResponse(fetchCalls);
       }
       console.error(`[Upstream Unreachable] ${networkFailures.join("; ")}`);
       return unreachableResponse("all attempted upstream endpoints unreachable");
