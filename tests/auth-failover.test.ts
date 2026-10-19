@@ -148,7 +148,7 @@ it("dedicated endpoint hides a rejected credential from the client", async () =>
       server: { host: "127.0.0.1", port: 8080, timeoutSeconds: 10 },
       strategy: { mode: "latch", debounceSeconds: 0, maxRetriesPerRequest: 1 },
       endpoints: [
-        { id: "dedicated", name: "Dedicated", baseUrl: `http://127.0.0.1:${server.port}/v1`, apiKey: apiKey(0), models: ["dedicated-model"], extraHeaders: { "X-Api-Key": headerSecret } },
+        { id: "dedicated", name: "Dedicated", baseUrl: `http://127.0.0.1:${server.port}/v1`, apiKey: apiKey(0), models: ["dedicated-model"], extraHeaders: { "Cookie": headerSecret } },
         { id: "pool", name: "Pool", baseUrl: "http://127.0.0.1:9/v1", apiKey: apiKey(1) },
       ],
     };

@@ -44,7 +44,7 @@ function isCloudflare1010OrWafBlock(status: number, bodyText: string): boolean {
 
 function redactCredentials(text: string, endpoint: EndpointConfig): string {
   const headerSecrets = Object.entries(endpoint.extraHeaders ?? {})
-    .filter(([name]) => /authorization|api[-_]?key|token|secret/i.test(name))
+    .filter(([name]) => /auth|cookie|session|api[-_]?key|token|secret|password/i.test(name))
     .map(([, value]) => value);
   const secrets = [endpoint.apiKey, ...headerSecrets]
     .filter(Boolean)
