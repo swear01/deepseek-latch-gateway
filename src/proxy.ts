@@ -43,8 +43,9 @@ function isCloudflare1010OrWafBlock(status: number, bodyText: string): boolean {
 }
 
 function redactCredentials(text: string, apiKey: string): string {
-  const withoutKey = apiKey.length >= 8 ? text.split(apiKey).join("[redacted]") : text;
+  const withoutKey = apiKey ? text.split(apiKey).join("[redacted]") : text;
   return withoutKey
+    .replace(/[\u0000-\u001f\u007f]/g, " ")
     .replace(/\b(?:oc_sk|sk|rk|pk|key|token)[-_][A-Za-z0-9_-]*\d[A-Za-z0-9_-]*/gi, "[redacted]")
     .replace(/\bBearer\s+\S+/gi, "Bearer [redacted]");
 }
@@ -458,6 +459,15 @@ function authFailedResponse(upstreamCalls: number, endpointId?: string): Respons
   );
 }
 
+function failedAttemptsResponse(networkFailures: string[], authOnly: boolean, upstreamCalls: number): Response {
+  if (authOnly) {
+    console.error(`[Upstream Auth Failed] ${networkFailures.join("; ")}`);
+    return authFailedResponse(upstreamCalls);
+  }
+  console.error(`[Upstream Unreachable] ${networkFailures.join("; ")}`);
+  return unreachableResponse("all attempted upstream endpoints unreachable", upstreamCalls);
+}
+
 function unreachableResponse(errorMsg: string, upstreamCalls: number, target: string = "upstream"): Response {
   return new Response(
     JSON.stringify({
@@ -586,12 +596,7 @@ async function handlePriorityProxyRequest(ctx: {
 
   latch.finishRequest(model, rejected);
   if (quotaRejected.size === 0 && networkFailures.length > 0) {
-    if (authFailures > 0 && !sawNonAuthFailure) {
-      console.error(`[Upstream Auth Failed] ${networkFailures.join("; ")}`);
-      return authFailedResponse(fetchCalls);
-    }
-    console.error(`[Upstream Unreachable] ${networkFailures.join("; ")}`);
-    return unreachableResponse("all attempted upstream endpoints unreachable", fetchCalls);
+    return failedAttemptsResponse(networkFailures, authFailures > 0 && !sawNonAuthFailure, fetchCalls);
   }
   return new Response(
     JSON.stringify({
@@ -888,12 +893,7 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
       // A definitive quota verdict always wins (429).
       // Detailed per-endpoint failures stay server-side: the client only
       // needs a generic connectivity error, not the pool topology.
-      if (authFailures > 0 && !sawNonAuthFailure) {
-        console.error(`[Upstream Auth Failed] ${networkFailures.join("; ")}`);
-        return authFailedResponse(fetchCalls);
-      }
-      console.error(`[Upstream Unreachable] ${networkFailures.join("; ")}`);
-      return unreachableResponse("all attempted upstream endpoints unreachable", fetchCalls);
+      return failedAttemptsResponse(networkFailures, authFailures > 0 && !sawNonAuthFailure, fetchCalls);
     }
     // Otherwise fall through to the 429 response below (loop exits naturally).
   }
