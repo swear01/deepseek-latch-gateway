@@ -42,6 +42,12 @@ function isCloudflare1010OrWafBlock(status: number, bodyText: string): boolean {
   );
 }
 
+function warnAuthFailure(endpointName: string, targetUrl: string, bodyText: string): void {
+  console.warn(
+    `\x1b[31m[Upstream 401 Auth]\x1b[0m ${endpointName} (${targetUrl}) rejected its credential: ${bodyText.slice(0, 150)}`
+  );
+}
+
 function warnCloudflareBlock(endpointName: string, targetUrl: string, bodyText: string): void {
   console.warn(
     `\x1b[31m[Upstream 403 Blocked]\x1b[0m ${endpointName} (${targetUrl}) returned Cloudflare Error 1010: ${bodyText.slice(0, 150)}`
@@ -503,6 +509,15 @@ async function handlePriorityProxyRequest(ctx: {
             latch.advance(model, attempt, `Status 403 Cloudflare 1010: ${errBody.slice(0, 100)}`);
             break;
           }
+          if (upstreamRes.status === 401) {
+            warnAuthFailure(endpoint.name, targetUrl, errBody);
+            networkError = "";
+            rejected.add(attempt.key);
+            networkFailures.push(`${endpoint.id}: Status 401 (${errBody.slice(0, 60)})`);
+            latch.recordNetworkFailure(model, attempt);
+            latch.advance(model, attempt, `Status 401: ${errBody.slice(0, 100)}`);
+            break;
+          }
           if (latch.isRecoveryProbe(model, attempt)) {
             networkError = "";
             rejected.add(attempt.key);
@@ -774,6 +789,14 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
             networkSkipped.add(currentIndex);
             networkFailures.push(`${endpoint.id}: Status 403 Cloudflare 1010 (${errBody.slice(0, 60)})`);
             latch.advanceOnNetworkFailure(currentIndex, `Status 403 Cloudflare 1010: ${errBody.slice(0, 100)}`);
+            break;
+          }
+          if (upstreamRes.status === 401) {
+            warnAuthFailure(endpoint.name, targetUrl, errBody);
+            networkError = "";
+            networkSkipped.add(currentIndex);
+            networkFailures.push(`${endpoint.id}: Status 401 (${errBody.slice(0, 60)})`);
+            latch.advanceOnNetworkFailure(currentIndex, `Status 401: ${errBody.slice(0, 100)}`);
             break;
           }
         }
