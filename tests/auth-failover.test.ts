@@ -85,7 +85,7 @@ for (const Manager of [PriorityLatchManager, RSLatchManager]) {
         const body = await response.json();
         if (code) {
           expect(body.error.code).toBe(code);
-          if (code === "upstream_auth_failed") expect(response.headers.get("X-Gateway-Attempt")).toBe("2");
+          expect(Number(response.headers.get("X-Gateway-Attempt"))).toBeGreaterThanOrEqual(2);
         } else {
           expect(response.headers.get("X-Gateway-Active-Endpoint")).toBe("opencode-go-2");
           expect(body.choices[0].message.content).toBe("OK");

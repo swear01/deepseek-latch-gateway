@@ -450,7 +450,7 @@ function authFailedResponse(upstreamCalls: number): Response {
   );
 }
 
-function unreachableResponse(errorMsg: string, target: string = "upstream"): Response {
+function unreachableResponse(errorMsg: string, upstreamCalls: number, target: string = "upstream"): Response {
   return new Response(
     JSON.stringify({
       error: {
@@ -461,7 +461,7 @@ function unreachableResponse(errorMsg: string, target: string = "upstream"): Res
     }),
     {
       status: 502,
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "X-Gateway-Attempt": String(upstreamCalls) },
     }
   );
 }
@@ -583,7 +583,7 @@ async function handlePriorityProxyRequest(ctx: {
       return authFailedResponse(fetchCalls);
     }
     console.error(`[Upstream Unreachable] ${networkFailures.join("; ")}`);
-    return unreachableResponse("all attempted upstream endpoints unreachable");
+    return unreachableResponse("all attempted upstream endpoints unreachable", fetchCalls);
   }
   return new Response(
     JSON.stringify({
@@ -739,7 +739,7 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
       } catch (err: unknown) {
         const errorMsg = (err as Error)?.message || String(err);
         console.error(`\x1b[31m[Fetch Error]\x1b[0m Failed to reach ${dedicated.name} (${targetUrl}): ${errorMsg}`);
-        return unreachableResponse(errorMsg, "dedicated upstream");
+        return unreachableResponse(errorMsg, 1, "dedicated upstream");
       }
     }
   }
@@ -885,7 +885,7 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
         return authFailedResponse(fetchCalls);
       }
       console.error(`[Upstream Unreachable] ${networkFailures.join("; ")}`);
-      return unreachableResponse("all attempted upstream endpoints unreachable");
+      return unreachableResponse("all attempted upstream endpoints unreachable", fetchCalls);
     }
     // Otherwise fall through to the 429 response below (loop exits naturally).
   }
