@@ -43,11 +43,16 @@ function isCloudflare1010OrWafBlock(status: number, bodyText: string): boolean {
 }
 
 function redactCredentials(text: string, endpoint: EndpointConfig): string {
-  const secrets = [endpoint.apiKey, ...Object.values(endpoint.extraHeaders ?? {})].filter(Boolean);
+  const headerSecrets = Object.entries(endpoint.extraHeaders ?? {})
+    .filter(([name]) => /authorization|api[-_]?key|token|secret/i.test(name))
+    .map(([, value]) => value);
+  const secrets = [endpoint.apiKey, ...headerSecrets]
+    .filter(Boolean)
+    .flatMap(secret => [secret, JSON.stringify(secret).slice(1, -1)]);
   const withoutSecrets = secrets.reduce((out, secret) => out.split(secret).join("[redacted]"), text);
   return withoutSecrets
     .replace(/[\u0000-\u001f\u007f]/g, " ")
-    .replace(/\b(?:oc_sk|sk|rk|pk|key|token)[-_:=]\s*(?=[A-Za-z0-9_-]*\d|[A-Za-z0-9_-]{20})[A-Za-z0-9_-]+/gi, "[redacted]")
+    .replace(/(?<![A-Za-z0-9])(?:oc_sk|sk|rk|pk|key|token)[-_:=]\s*(?=[A-Za-z0-9_-]*\d|[A-Za-z0-9_-]{20})[A-Za-z0-9_-]+/gi, "[redacted]")
     .replace(/\bBearer\s+\S+/gi, "Bearer [redacted]");
 }
 
@@ -502,6 +507,7 @@ async function handlePriorityProxyRequest(ctx: {
   const networkFailures: string[] = [];
   let sawAuthFailure = false;
   let sawNonAuthFailure = false;
+  const authRejected = new Set<string>();
   let attempts = 0;
   let fetchCalls = 0;
 
@@ -509,6 +515,10 @@ async function handlePriorityProxyRequest(ctx: {
     const attempt = latch.getAttempt(model, rejected);
     if (!attempt) break;
     const endpoint = attempt.endpoint;
+    if (authRejected.has(endpoint.id)) {
+      rejected.add(attempt.key);
+      continue;
+    }
     const targetUrl = buildTargetUrl(endpoint.baseUrl, pathWithQuery);
     const modelMap = attempt.upstreamModel ? { [model]: attempt.upstreamModel } : undefined;
     latch.recordRequest(model, attempt);
@@ -561,6 +571,7 @@ async function handlePriorityProxyRequest(ctx: {
             networkError = "";
             rejected.add(attempt.key);
             sawAuthFailure = true;
+            authRejected.add(endpoint.id);
             networkFailures.push(`${endpoint.id}: Status 401 (${safeBody.slice(0, 60)})`);
             latch.recordNetworkFailure(model, attempt);
             latch.advance(model, attempt, `Status 401: ${safeBody.slice(0, 100)}`);
@@ -607,7 +618,7 @@ async function handlePriorityProxyRequest(ctx: {
         code: 429,
       },
     }),
-    { status: 429, headers: { "Content-Type": "application/json" } }
+    { status: 429, headers: { "Content-Type": "application/json", "X-Gateway-Attempt": String(fetchCalls) } }
   );
 }
 
@@ -910,7 +921,7 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
     }),
     {
       status: 429,
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "X-Gateway-Attempt": String(fetchCalls) },
     }
   );
 }
