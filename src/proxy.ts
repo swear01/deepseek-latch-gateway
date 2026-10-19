@@ -42,11 +42,12 @@ function isCloudflare1010OrWafBlock(status: number, bodyText: string): boolean {
   );
 }
 
-function redactCredentials(text: string, apiKey: string): string {
-  const withoutKey = apiKey ? text.split(apiKey).join("[redacted]") : text;
-  return withoutKey
+function redactCredentials(text: string, endpoint: EndpointConfig): string {
+  const secrets = [endpoint.apiKey, ...Object.values(endpoint.extraHeaders ?? {})].filter(Boolean);
+  const withoutSecrets = secrets.reduce((out, secret) => out.split(secret).join("[redacted]"), text);
+  return withoutSecrets
     .replace(/[\u0000-\u001f\u007f]/g, " ")
-    .replace(/\b(?:oc_sk|sk|rk|pk|key|token)[-_][A-Za-z0-9_-]*\d[A-Za-z0-9_-]*/gi, "[redacted]")
+    .replace(/\b(?:oc_sk|sk|rk|pk|key|token)[-_:=]\s*(?=[A-Za-z0-9_-]*\d|[A-Za-z0-9_-]{20})[A-Za-z0-9_-]+/gi, "[redacted]")
     .replace(/\bBearer\s+\S+/gi, "Bearer [redacted]");
 }
 
@@ -57,7 +58,7 @@ function withoutQuery(url: string): string {
 
 function reportAuthFailure(endpoint: EndpointConfig, targetUrl: string, upstreamRes: Response, bodyText: string): string {
   void upstreamRes.body?.cancel().catch(() => {});
-  const safeBody = redactCredentials(bodyText, endpoint.apiKey);
+  const safeBody = redactCredentials(bodyText.slice(0, 512), endpoint);
   console.warn(
     `\x1b[31m[Upstream 401 Auth]\x1b[0m ${endpoint.name} (${withoutQuery(targetUrl)}) rejected its credential: ${safeBody.slice(0, 150)}`
   );
@@ -499,7 +500,7 @@ async function handlePriorityProxyRequest(ctx: {
   const rejected = new Set<string>();
   const quotaRejected = new Set<string>();
   const networkFailures: string[] = [];
-  let authFailures = 0;
+  let sawAuthFailure = false;
   let sawNonAuthFailure = false;
   let attempts = 0;
   let fetchCalls = 0;
@@ -559,7 +560,7 @@ async function handlePriorityProxyRequest(ctx: {
             const safeBody = reportAuthFailure(endpoint, targetUrl, upstreamRes, errBody);
             networkError = "";
             rejected.add(attempt.key);
-            authFailures++;
+            sawAuthFailure = true;
             networkFailures.push(`${endpoint.id}: Status 401 (${safeBody.slice(0, 60)})`);
             latch.recordNetworkFailure(model, attempt);
             latch.advance(model, attempt, `Status 401: ${safeBody.slice(0, 100)}`);
@@ -596,7 +597,7 @@ async function handlePriorityProxyRequest(ctx: {
 
   latch.finishRequest(model, rejected);
   if (quotaRejected.size === 0 && networkFailures.length > 0) {
-    return failedAttemptsResponse(networkFailures, authFailures > 0 && !sawNonAuthFailure, fetchCalls);
+    return failedAttemptsResponse(networkFailures, sawAuthFailure && !sawNonAuthFailure, fetchCalls);
   }
   return new Response(
     JSON.stringify({
@@ -768,7 +769,7 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
   const networkSkipped = new Set<number>();
   // Aggregated `endpoint: error` summaries for the final 502 (if any).
   const networkFailures: string[] = [];
-  let authFailures = 0;
+  let sawAuthFailure = false;
   let sawNonAuthFailure = false;
   // Invariant: every loop iteration below adds at least one index to a skip
   // set (or returns), and maxRetries <= poolSize, so at least one un-skipped
@@ -852,7 +853,7 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
             const safeBody = reportAuthFailure(endpoint, targetUrl, upstreamRes, errBody);
             networkError = "";
             networkSkipped.add(currentIndex);
-            authFailures++;
+            sawAuthFailure = true;
             networkFailures.push(`${endpoint.id}: Status 401 (${safeBody.slice(0, 60)})`);
             latch.advanceOnNetworkFailure(currentIndex, `Status 401: ${safeBody.slice(0, 100)}`);
             break;
@@ -893,7 +894,7 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
       // A definitive quota verdict always wins (429).
       // Detailed per-endpoint failures stay server-side: the client only
       // needs a generic connectivity error, not the pool topology.
-      return failedAttemptsResponse(networkFailures, authFailures > 0 && !sawNonAuthFailure, fetchCalls);
+      return failedAttemptsResponse(networkFailures, sawAuthFailure && !sawNonAuthFailure, fetchCalls);
     }
     // Otherwise fall through to the 429 response below (loop exits naturally).
   }

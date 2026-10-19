@@ -11,7 +11,7 @@ function expiredBody(index: number) {
     error: {
       type: "authentication_error",
       code: "api_key_expired",
-      message: `Key ${apiKey(index)} has expired (oc_sk_echoedSecretValue123), reason token_not_supported.\nFORGED-LOG-LINE Authorization: Bearer bearerSecret7 sk-proj-skSecret42`,
+      message: `Key ${apiKey(index)} has expired (oc_sk_echoedSecretValue123), reason token_not_supported.\nFORGED-LOG-LINE Authorization: Bearer bearerSecret7 sk-proj-skSecret42 X-Api-Key: headerformSecretabcdefghijkl`,
     },
   };
 }
@@ -30,6 +30,7 @@ function expectNoSecrets(text: string) {
   expect(text).not.toContain("clientQuerySecret");
   expect(text).not.toContain("bearerSecret");
   expect(text).not.toContain("skSecret");
+  expect(text).not.toContain("headerformSecret");
   expect(text).not.toMatch(/\nFORGED-LOG-LINE/);
 }
 
