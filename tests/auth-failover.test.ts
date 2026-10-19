@@ -11,7 +11,7 @@ function expiredBody(index: number) {
     error: {
       type: "authentication_error",
       code: "api_key_expired",
-      message: `Key ${apiKey(index)} has expired (oc_sk_echoedSecretValue123), reason token_not_supported.\nFORGED-LOG-LINE Authorization: Bearer bearerSecret7 sk-proj-skSecret42 X-Api-Key: headerformSecretabcdefghijkl api_key=underscoreSecret5`,
+      message: `Key ${apiKey(index)} has expired (oc_sk_echoedSecretValue123), reason token_not_supported.\nFORGED-LOG-LINE\u2028UNICODE-FORGED Authorization: Bearer bearerSecret7 sk-proj-skSecret42 X-Api-Key: headerformSecretabcdefghijkl api_key=underscoreSecret5`,
     },
   };
 }
@@ -33,6 +33,7 @@ function expectNoSecrets(text: string) {
   expect(text).not.toContain("headerformSecret");
   expect(text).not.toContain("underscoreSecret");
   expect(text).not.toMatch(/\nFORGED-LOG-LINE/);
+  expect(text).not.toContain("\u2028");
 }
 
 function chatRequest(model: string, query = "") {

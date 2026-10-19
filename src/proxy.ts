@@ -46,11 +46,12 @@ function redactCredentials(text: string, endpoint: EndpointConfig): string {
   const headerSecrets = Object.values(endpoint.extraHeaders ?? {}).filter(value => value.length >= 8);
   const secrets = [endpoint.apiKey, ...headerSecrets]
     .filter(Boolean)
-    .flatMap(secret => [secret, JSON.stringify(secret).slice(1, -1)]);
+    .flatMap(secret => [secret, JSON.stringify(secret).slice(1, -1)])
+    .sort((a, b) => b.length - a.length);
   const withoutSecrets = secrets.reduce((out, secret) => out.split(secret).join("[redacted]"), text);
   return withoutSecrets
     .slice(0, 512)
-    .replace(/[\u0000-\u001f\u007f]/g, " ")
+    .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, " ")
     .replace(/(?<![A-Za-z0-9])(?:oc_sk|sk|rk|pk|key|token)[-_:=]\s*(?=[A-Za-z0-9_-]*\d|[A-Za-z0-9_-]{20})[A-Za-z0-9_-]+/gi, "[redacted]")
     .replace(/\bBearer\s+\S+/gi, "Bearer [redacted]");
 }
