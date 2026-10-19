@@ -51,6 +51,7 @@ function redactCredentials(text: string, endpoint: EndpointConfig): string {
     .flatMap(secret => [secret, JSON.stringify(secret).slice(1, -1)]);
   const withoutSecrets = secrets.reduce((out, secret) => out.split(secret).join("[redacted]"), text);
   return withoutSecrets
+    .slice(0, 512)
     .replace(/[\u0000-\u001f\u007f]/g, " ")
     .replace(/(?<![A-Za-z0-9])(?:oc_sk|sk|rk|pk|key|token)[-_:=]\s*(?=[A-Za-z0-9_-]*\d|[A-Za-z0-9_-]{20})[A-Za-z0-9_-]+/gi, "[redacted]")
     .replace(/\bBearer\s+\S+/gi, "Bearer [redacted]");
@@ -63,7 +64,7 @@ function withoutQuery(url: string): string {
 
 function reportAuthFailure(endpoint: EndpointConfig, targetUrl: string, upstreamRes: Response, bodyText: string): string {
   void upstreamRes.body?.cancel().catch(() => {});
-  const safeBody = redactCredentials(bodyText.slice(0, 512), endpoint);
+  const safeBody = redactCredentials(bodyText, endpoint);
   console.warn(
     `\x1b[31m[Upstream 401 Auth]\x1b[0m ${endpoint.name} (${withoutQuery(targetUrl)}) rejected its credential: ${safeBody.slice(0, 150)}`
   );
@@ -453,7 +454,9 @@ function authFailedResponse(upstreamCalls: number, endpointId?: string): Respons
   return new Response(
     JSON.stringify({
       error: {
-        message: "All attempted upstream endpoints rejected the gateway's credentials.",
+        message: endpointId
+          ? "The upstream endpoint rejected the gateway's credentials."
+          : "All attempted upstream endpoints rejected the gateway's credentials.",
         type: "gateway_error",
         code: "upstream_auth_failed",
       },
@@ -592,7 +595,7 @@ async function handlePriorityProxyRequest(ctx: {
         return await forwardUpstreamResponse(upstreamRes, endpoint, fetchCalls);
       } catch (err: unknown) {
         networkError = (err as Error)?.message || String(err);
-        console.error(`\\x1b[31m[Fetch Error]\\x1b[0m Failed to reach ${endpoint.name} (${targetUrl}): ${networkError}`);
+        console.error(`\\x1b[31m[Fetch Error]\\x1b[0m Failed to reach ${endpoint.name} (${withoutQuery(targetUrl)}): ${networkError}`);
       }
     }
 
@@ -763,7 +766,7 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
         return await forwardUpstreamResponse(upstreamRes, dedicated, 1);
       } catch (err: unknown) {
         const errorMsg = (err as Error)?.message || String(err);
-        console.error(`\x1b[31m[Fetch Error]\x1b[0m Failed to reach ${dedicated.name} (${targetUrl}): ${errorMsg}`);
+        console.error(`\x1b[31m[Fetch Error]\x1b[0m Failed to reach ${dedicated.name} (${withoutQuery(targetUrl)}): ${errorMsg}`);
         return unreachableResponse(errorMsg, 1, "dedicated upstream");
       }
     }
@@ -879,7 +882,7 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
         return await forwardUpstreamResponse(upstreamRes, endpoint, fetchCalls);
       } catch (err: unknown) {
         networkError = (err as Error)?.message || String(err);
-        console.error(`\x1b[31m[Fetch Error]\x1b[0m Failed to reach ${endpoint.name} (${targetUrl}): ${networkError}`);
+        console.error(`\x1b[31m[Fetch Error]\x1b[0m Failed to reach ${endpoint.name} (${withoutQuery(targetUrl)}): ${networkError}`);
         // Network/fetch failures are NOT quota exhaustion: never flip the
         // RS-Latch on a single transient failure (a hiccup is retried above; a
         // flip would strand all traffic on the exhausted peer and surface false

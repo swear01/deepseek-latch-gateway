@@ -4,7 +4,7 @@ import { PriorityLatchManager } from "../src/priority-latch";
 import { handleProxyRequest } from "../src/proxy";
 import type { GatewayConfig } from "../src/types";
 
-const apiKey = (index: number) => `plain-configured-secret-${index + 1}`;
+const apiKey = (index: number) => `plain-configured-secret-${index + 1}-${"x".repeat(600)}`;
 
 function expiredBody(index: number) {
   return {
