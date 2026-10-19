@@ -49,7 +49,8 @@ function redactCredentials(text: string, apiKey: string): string {
     .replace(/\bBearer\s+\S+/gi, "Bearer [redacted]");
 }
 
-function reportAuthFailure(endpoint: EndpointConfig, targetUrl: string, bodyText: string): string {
+function reportAuthFailure(endpoint: EndpointConfig, targetUrl: string, upstreamRes: Response, bodyText: string): string {
+  void upstreamRes.body?.cancel().catch(() => {});
   const safeBody = redactCredentials(bodyText, endpoint.apiKey);
   console.warn(
     `\x1b[31m[Upstream 401 Auth]\x1b[0m ${endpoint.name} (${targetUrl}) rejected its credential: ${safeBody.slice(0, 150)}`
@@ -538,7 +539,7 @@ async function handlePriorityProxyRequest(ctx: {
             break;
           }
           if (upstreamRes.status === 401) {
-            const safeBody = reportAuthFailure(endpoint, targetUrl, errBody);
+            const safeBody = reportAuthFailure(endpoint, targetUrl, upstreamRes, errBody);
             networkError = "";
             rejected.add(attempt.key);
             authFailures++;
@@ -731,7 +732,7 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
           if (isRateLimitOrQuotaError(upstreamRes.status, errBody)) {
             latch.record429For(dedicated.id, `Status ${upstreamRes.status}`);
           } else if (upstreamRes.status === 401) {
-            reportAuthFailure(dedicated, targetUrl, errBody);
+            reportAuthFailure(dedicated, targetUrl, upstreamRes, errBody);
             return authFailedResponse(1);
           }
         }
@@ -836,7 +837,7 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
             break;
           }
           if (upstreamRes.status === 401) {
-            const safeBody = reportAuthFailure(endpoint, targetUrl, errBody);
+            const safeBody = reportAuthFailure(endpoint, targetUrl, upstreamRes, errBody);
             networkError = "";
             networkSkipped.add(currentIndex);
             authFailures++;
