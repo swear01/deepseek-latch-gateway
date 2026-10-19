@@ -69,8 +69,12 @@ observed at weekly limit while key 2 stayed healthy.
 Zen **balance** exhaustion is a different shape: HTTP **401**
 (`{"type":"error","error":{"type":"CreditsError","message":"Insufficient
 balance..."}}`). That is also quota. The classifier matches `creditserror` and
-`insufficient balance` so the request latches instead of forwarding 401. A
-plain 401 without those strings is still treated as a normal client error.
+`insufficient balance` so the request latches instead of forwarding 401; a 401
+carrying any other quota marker the classifier knows takes the same path. Any
+other 401 (for example `api_key_expired` after the October 2026 OpenCode key
+revocation) is treated as an endpoint failure, not quota: the endpoint is
+skipped without a quota cooldown and the request moves to the next member.
+If every attempted endpoint fails this way, the client receives 502 `upstream_auth_failed`, never the raw 401. A dedicated-model endpoint has no peer to try, so its 401 returns 502 `upstream_auth_failed` immediately.
 
 An inactive Go subscription returns HTTP **403** with `An active OpenCode Go
 subscription is required to use Go models.` The shared classifier recognizes
