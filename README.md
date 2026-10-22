@@ -162,7 +162,7 @@ Set your keys in your shell or `~/.secrets`:
 export OPENCODE_API_KEY_1="sk-opencode-account-1"
 export OPENCODE_API_KEY_2="sk-opencode-account-2"
 export OPENCODE_API_KEY_3="sk-opencode-account-3"
-export COMMAMD_CODE_API_KEY="sk-command-code"
+export COMMAND_CODE_API_KEY="sk-command-code"
 export OPENROUTER_API_KEY="sk-or-v1-openrouter"
 ```
 
