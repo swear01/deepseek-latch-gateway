@@ -14,7 +14,7 @@ endpoints:
   - id: "command-code"
     name: "Command Code"
     base_url: "https://api.commandcode.ai/provider/v1"
-    api_key: "${COMMAMD_CODE_API_KEY}"
+    api_key: "${COMMAND_CODE_API_KEY}"
     compat:
       strip_response_format: true
       response_reasoning_field: "reasoning"
