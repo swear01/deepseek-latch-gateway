@@ -1,6 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { join } from "node:path";
 import { PriorityLatchManager } from "../src/priority-latch";
 import { handleProxyRequest } from "../src/proxy";
+import { loadRoutingConfig } from "../src/routing";
 import type { GatewayConfig } from "../src/types";
 
 let openCode1: ReturnType<typeof Bun.serve>;
@@ -296,6 +298,35 @@ describe("hierarchical priority routing", () => {
         provider: { sort: "throughput", max_price: { prompt: 0.15, completion: 0.60 } },
       });
       expect(openRouterBody).not.toHaveProperty("response_format");
+    } finally {
+      commandCodeStatus = 200;
+    }
+  });
+
+  it("serves shipped deepseek-flash from the OpenRouter 1017 snapshot once OpenCode and Command Code fail", async () => {
+    const config = createConfig();
+    config.endpoints.push({
+      id: "openrouter",
+      name: "OpenRouter (fast capped)",
+      baseUrl: "http://127.0.0.1:19105/v1",
+      apiKey: "or-key",
+    });
+    config.routing = loadRoutingConfig(join(import.meta.dir, "../routing.example.yaml"));
+    commandCodeStatus = 429;
+    openRouterHits = 0;
+    openRouterBody = undefined;
+    try {
+      const manager = new PriorityLatchManager(config);
+      const req = new Request("http://127.0.0.1:8080/v1/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: "deepseek-flash", messages: [] }),
+      });
+      const response = await handleProxyRequest({ req, url: new URL(req.url), latch: manager, config });
+      expect(response.status).toBe(200);
+      expect(response.headers.get("X-Gateway-Active-Endpoint")).toBe("openrouter");
+      expect(openRouterHits).toBe(1);
+      expect(openRouterBody).toMatchObject({ model: "deepseek/deepseek-v4.1-flash-1017" });
     } finally {
       commandCodeStatus = 200;
     }
