@@ -1,20 +1,16 @@
-import type { GatewayConfig, EndpointConfig } from "./types";
-import type { RSLatchManager } from "./latch";
-import { PriorityLatchManager } from "./priority-latch";
 import { createHash } from "node:crypto";
+import type { Router } from "./router";
+import type { Deployment, GatewayConfig, ProviderConfig } from "./types";
 
 interface ProxyRequestContext {
   req: Request;
   url: URL;
-  latch: RSLatchManager | PriorityLatchManager;
+  router: Router;
   config: GatewayConfig;
 }
 
-/**
- * Upstream attempts per pool endpoint per request: the original call plus one
- * same-endpoint retry for transient network failures (see pool loop below).
- */
-const SAME_ENDPOINT_ATTEMPTS = 2;
+/** The original call plus one same-provider retry for a transient network failure. */
+const SAME_PROVIDER_ATTEMPTS = 2;
 const DEFAULT_GATEWAY_USER_AGENT = "aisimpv-gateway/1.0";
 
 function resolveUserAgent(rawUserAgent: string | null): string {
@@ -42,9 +38,43 @@ function isCloudflare1010OrWafBlock(status: number, bodyText: string): boolean {
   );
 }
 
-function redactCredentials(text: string, endpoint: EndpointConfig): string {
-  const headerSecrets = Object.values(endpoint.extraHeaders ?? {}).filter(value => value.length >= 8);
-  const secrets = [endpoint.apiKey, ...headerSecrets]
+function isQuotaError(status: number, bodyText: string): boolean {
+  if (status === 429 || status === 402) return true;
+  const lower = bodyText.toLowerCase();
+  return (
+    lower.includes("insufficient_quota") ||
+    lower.includes("rate_limit_exceeded") ||
+    lower.includes("quota exceeded") ||
+    lower.includes("too many requests") ||
+    lower.includes("usage limit reached") ||
+    lower.includes("gousagelimiterror") ||
+    lower.includes("usagelimiterror") ||
+    lower.includes("weekly usage limit") ||
+    lower.includes("regionerror") ||
+    lower.includes("creditserror") ||
+    lower.includes("insufficient balance") ||
+    (status === 403 && lower.includes("an active opencode go subscription is required to use go models"))
+  );
+}
+
+/**
+ * The provider itself is unusable (quota, credentials, block, outage), so the
+ * request moves to the next deployment. Other 4xx answers describe the client
+ * request and are relayed unchanged.
+ */
+function isProviderFailure(status: number, bodyText: string): boolean {
+  return (
+    status === 401 ||
+    status === 408 ||
+    status >= 500 ||
+    isQuotaError(status, bodyText) ||
+    isCloudflare1010OrWafBlock(status, bodyText)
+  );
+}
+
+function redactCredentials(text: string, provider: ProviderConfig): string {
+  const headerSecrets = Object.values(provider.extraHeaders ?? {}).filter(value => value.length >= 8);
+  const secrets = [provider.apiKey, ...headerSecrets]
     .filter(Boolean)
     .flatMap(secret => [secret, JSON.stringify(secret).slice(1, -1)])
     .sort((a, b) => b.length - a.length);
@@ -61,188 +91,8 @@ function withoutQuery(url: string): string {
   return queryStart === -1 ? url : `${url.slice(0, queryStart)}?[redacted]`;
 }
 
-function reportAuthFailure(endpoint: EndpointConfig, targetUrl: string, upstreamRes: Response, bodyText: string): string {
-  void upstreamRes.body?.cancel().catch(() => {});
-  const safeBody = redactCredentials(bodyText, endpoint);
-  console.warn(
-    `\x1b[31m[Upstream 401 Auth]\x1b[0m ${endpoint.name} (${withoutQuery(targetUrl)}) rejected its credential: ${safeBody.slice(0, 150)}`
-  );
-  return safeBody;
-}
-
-function warnCloudflareBlock(endpointName: string, targetUrl: string, bodyText: string): void {
-  console.warn(
-    `\x1b[31m[Upstream 403 Blocked]\x1b[0m ${endpointName} (${targetUrl}) returned Cloudflare Error 1010: ${bodyText.slice(0, 150)}`
-  );
-}
-
-function isRateLimitOrQuotaError(status: number, bodyText: string): boolean {
-  if (status === 429 || status === 402) {
-    return true;
-  }
-  const lower = bodyText.toLowerCase();
-  if (
-    lower.includes("insufficient_quota") ||
-    lower.includes("rate_limit_exceeded") ||
-    lower.includes("quota exceeded") ||
-    lower.includes("too many requests") ||
-    lower.includes("usage limit reached") ||
-    lower.includes("gousagelimiterror") ||
-    lower.includes("usagelimiterror") ||
-    lower.includes("weekly usage limit") ||
-    lower.includes("regionerror") ||
-    lower.includes("creditserror") ||
-    lower.includes("insufficient balance") ||
-    (status === 403 && lower.includes("an active opencode go subscription is required to use go models"))
-  ) {
-    return true;
-  }
-  return false;
-}
-
-function retryAfterMs(value: string | null): number | undefined {
-  if (!value) return undefined;
-  const seconds = Number(value);
-  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
-  const timestamp = Date.parse(value);
-  if (Number.isNaN(timestamp)) return undefined;
-  return Math.max(0, timestamp - Date.now());
-}
-
-function parseRequestBody(bodyText: string): { json: Record<string, unknown>; model?: string } | null {
-  if (!bodyText) return null;
-  try {
-    const json = JSON.parse(bodyText);
-    if (json && typeof json === "object" && typeof json.model === "string") {
-      return { json, model: json.model };
-    }
-    return { json };
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Apply global model aliases in place on an already-parsed request body.
- * Returns the original text when nothing changes (byte-preserving).
- */
-function rewriteRequestBody(
-  parsed: { json: Record<string, unknown>; model?: string } | null,
-  bodyText: string,
-  config: GatewayConfig
-): string {
-  if (!parsed || !config.models?.aliases || Object.keys(config.models.aliases).length === 0) {
-    return bodyText;
-  }
-  const alias = config.models.aliases[parsed.model || ""];
-  if (alias && alias !== parsed.model) {
-    parsed.json.model = alias;
-    return JSON.stringify(parsed.json);
-  }
-  return bodyText;
-}
-
-async function forwardToEndpoint(
-  endpoint: EndpointConfig,
-  req: Request,
-  targetUrl: string,
-  method: string,
-  bodyText: string,
-  modelMap?: Record<string, string>
-): Promise<Response> {
-  let finalBodyText = bodyText;
-  const parsed = parseRequestBody(bodyText);
-  if (parsed && parsed.json !== null && typeof parsed.json === "object") {
-    const mappedModel = modelMap && parsed.model ? modelMap[parsed.model] : undefined;
-    const stripResponseFormat =
-      endpoint.compat?.stripResponseFormat && "response_format" in parsed.json;
-    const extraBody = endpoint.extraBody;
-    if (mappedModel || stripResponseFormat || extraBody) {
-      if (extraBody) {
-        for (const [key, value] of Object.entries(extraBody)) {
-          if (key === "model" || key === "response_format") continue;
-          parsed.json[key] = value;
-        }
-      }
-      if (mappedModel) {
-        parsed.json.model = mappedModel;
-      }
-      if (stripResponseFormat) {
-        // Upstream rejects the official response_format param (e.g. Command
-        // Code 400 "Invalid input", OpenCode Go 400 "must contain the word json").
-        delete parsed.json.response_format;
-      }
-      finalBodyText = JSON.stringify(parsed.json);
-    }
-  }
-
-  const headers = new Headers();
-  req.headers.forEach((val, key) => {
-    const lowerKey = key.toLowerCase();
-    // Drop hop-by-hop headers, host, and user-agent (resolved explicitly below)
-    if (
-      lowerKey !== "host" &&
-      lowerKey !== "authorization" &&
-      lowerKey !== "content-length" &&
-      lowerKey !== "user-agent"
-    ) {
-      headers.set(key, val);
-    }
-  });
-
-  headers.set("User-Agent", resolveUserAgent(req.headers.get("user-agent")));
-  if (method !== "GET" && method !== "HEAD" && !headers.has("content-type") && parsed?.json) {
-    headers.set("Content-Type", "application/json");
-  }
-
-  headers.set("Authorization", `Bearer ${endpoint.apiKey}`);
-  if (endpoint.extraHeaders) {
-    for (const [k, v] of Object.entries(endpoint.extraHeaders)) {
-      headers.set(k, v);
-    }
-  }
-
-  const targetHost = new URL(targetUrl).hostname;
-  const isOpenCode = targetHost === "opencode.ai" || targetHost.endsWith(".opencode.ai");
-  if (isOpenCode && method === "POST") {
-    let sessionId = [
-      "x-opencode-session",
-      "x-deepseek-harness-session-id",
-      "x-session-id",
-      "x-session-affinity",
-      "x-conversation-id",
-      "session_id",
-      "conversation_id",
-    ]
-      .map((name) => req.headers.get(name)?.trim()).find(Boolean);
-    if (!sessionId) {
-      const body = parsed?.json;
-      const messages = body && (Array.isArray(body.messages) ? body.messages : body.input);
-      const opening = Array.isArray(messages)
-        ? messages.find((message) => message?.role === "user")?.content
-        : typeof messages === "string" ? messages : body?.prompt;
-      if (opening === undefined || opening === null) {
-        return Response.json({ error: { type: "invalid_request_error", code: "missing_session_id",
-          message: "Send x-opencode-session with a stable conversation ID when no opening user message is available." } }, { status: 400 });
-      }
-      // ponytail: identical openings share affinity; clients must send a session ID for exact isolation and compaction.
-      sessionId = createHash("sha256").update(JSON.stringify([
-        req.headers.get("authorization"), req.headers.get("x-deepseek-harness-user-id"), body?.user, opening,
-      ])).digest("hex");
-    }
-    headers.set("x-opencode-session", sessionId);
-  }
-
-  return fetch(targetUrl, {
-    method,
-    headers,
-    body: method !== "GET" && method !== "HEAD" ? finalBodyText : undefined,
-    signal: req.signal,
-  });
-}
-
 function buildTargetUrl(baseUrl: string, pathWithQuery: string): string {
-  let cleanBase = baseUrl.replace(/\/+$/, "");
+  const cleanBase = baseUrl.replace(/\/+$/, "");
   let cleanPath = pathWithQuery;
   if (cleanBase.endsWith("/v1") && cleanPath.startsWith("/v1")) {
     cleanPath = cleanPath.slice(3);
@@ -250,7 +100,73 @@ function buildTargetUrl(baseUrl: string, pathWithQuery: string): string {
   return `${cleanBase}${cleanPath}`;
 }
 
-function buildUpstreamHeaders(upstreamRes: Response, endpointId: string, upstreamCalls: number): Headers {
+function errorResponse(status: number, type: string, code: string, message: string, headers: Record<string, string> = {}): Response {
+  return Response.json({ error: { message, type, code } }, { status, headers });
+}
+
+function buildUpstreamBody(body: Record<string, unknown>, provider: ProviderConfig, deployment: Deployment): string {
+  const out: Record<string, unknown> = { ...body };
+  for (const [key, value] of Object.entries(provider.extraBody ?? {})) {
+    if (key === "model" || key === "response_format") continue;
+    out[key] = value;
+  }
+  out.model = deployment.model;
+  if (provider.compat?.stripResponseFormat) {
+    // Upstream rejects the official response_format param (e.g. Command
+    // Code 400 "Invalid input", OpenCode Go 400 "must contain the word json").
+    delete out.response_format;
+  }
+  return JSON.stringify(out);
+}
+
+/** OpenCode Go needs a stable session id; derive it from the caller or the opening message. */
+function openCodeSessionId(req: Request, body: Record<string, unknown>): string | undefined {
+  const explicit = [
+    "x-opencode-session",
+    "x-deepseek-harness-session-id",
+    "x-session-id",
+    "x-session-affinity",
+    "x-conversation-id",
+    "session_id",
+    "conversation_id",
+  ]
+    .map((name) => req.headers.get(name)?.trim()).find(Boolean);
+  if (explicit) return explicit;
+  const messages = Array.isArray(body.messages) ? body.messages : body.input;
+  const opening = Array.isArray(messages)
+    ? messages.find((message) => message?.role === "user")?.content
+    : typeof messages === "string" ? messages : body.prompt;
+  if (opening === undefined || opening === null) return undefined;
+  // ponytail: identical openings share affinity; clients must send a session ID for exact isolation and compaction.
+  return createHash("sha256").update(JSON.stringify([
+    req.headers.get("authorization"), req.headers.get("x-deepseek-harness-user-id"), body.user, opening,
+  ])).digest("hex");
+}
+
+function isOpenCode(targetUrl: string): boolean {
+  const host = new URL(targetUrl).hostname;
+  return host === "opencode.ai" || host.endsWith(".opencode.ai");
+}
+
+function buildUpstreamHeaders(req: Request, provider: ProviderConfig, sessionId?: string): Headers {
+  const headers = new Headers();
+  req.headers.forEach((val, key) => {
+    const lowerKey = key.toLowerCase();
+    if (lowerKey !== "host" && lowerKey !== "authorization" && lowerKey !== "content-length" && lowerKey !== "user-agent") {
+      headers.set(key, val);
+    }
+  });
+  headers.set("User-Agent", resolveUserAgent(req.headers.get("user-agent")));
+  if (!headers.has("content-type")) headers.set("Content-Type", "application/json");
+  headers.set("Authorization", `Bearer ${provider.apiKey}`);
+  for (const [k, v] of Object.entries(provider.extraHeaders ?? {})) {
+    headers.set(k, v);
+  }
+  if (sessionId) headers.set("x-opencode-session", sessionId);
+  return headers;
+}
+
+function buildClientHeaders(upstreamRes: Response, deployment: Deployment, upstreamCalls: number): Headers {
   const responseHeaders = new Headers();
   upstreamRes.headers.forEach((val, key) => {
     const lowerKey = key.toLowerCase();
@@ -258,7 +174,8 @@ function buildUpstreamHeaders(upstreamRes: Response, endpointId: string, upstrea
       responseHeaders.set(key, val);
     }
   });
-  responseHeaders.set("X-Gateway-Active-Endpoint", endpointId);
+  responseHeaders.set("X-Gateway-Active-Endpoint", deployment.provider);
+  responseHeaders.set("X-Gateway-Upstream-Model", deployment.model);
   responseHeaders.set("X-Gateway-Attempt", String(upstreamCalls));
   return responseHeaders;
 }
@@ -373,17 +290,10 @@ function rewriteSseReasoningField(body: ReadableStream<Uint8Array>, field: strin
 
 /**
  * Body-consumption failure during response normalization: report a
- * deterministic 502 instead of throwing into the pool retry loop (a retry
- * would issue a fresh upstream LLM call for a response the provider already
- * produced — duplicate billing).
+ * deterministic 502 instead of retrying (a retry would issue a fresh upstream
+ * LLM call for a response the provider already produced — duplicate billing).
  */
-function upstreamBodyReadFailure(
-  upstreamRes: Response,
-  endpointId: string,
-  upstreamCalls: number,
-  err: unknown
-): Response {
-  const headers = buildUpstreamHeaders(upstreamRes, endpointId, upstreamCalls);
+function upstreamBodyReadFailure(headers: Headers, err: unknown): Response {
   headers.set("Content-Type", "application/json");
   return new Response(
     JSON.stringify({
@@ -399,23 +309,24 @@ function upstreamBodyReadFailure(
 
 async function forwardUpstreamResponse(
   upstreamRes: Response,
-  endpoint: EndpointConfig,
+  provider: ProviderConfig,
+  deployment: Deployment,
   upstreamCalls: number
 ): Promise<Response> {
-  const compat = endpoint.compat;
-  const headers = buildUpstreamHeaders(upstreamRes, endpoint.id, upstreamCalls);
+  const compat = provider.compat;
+  const headers = buildClientHeaders(upstreamRes, deployment, upstreamCalls);
   const { status, statusText } = upstreamRes;
 
-  // Compat bridges happen only when the endpoint declares a deviation;
-  // otherwise the upstream body is streamed through zero-copy as before.
+  // Compat bridges happen only when the provider declares a deviation;
+  // otherwise the upstream body is streamed through zero-copy.
   if (compat?.unwrapError && !upstreamRes.ok) {
     let bodyText: string;
     try {
       bodyText = await upstreamRes.text();
     } catch (err) {
-      return upstreamBodyReadFailure(upstreamRes, endpoint.id, upstreamCalls, err);
+      return upstreamBodyReadFailure(headers, err);
     }
-    headers.set("Content-Type", "application/json"); // body is replaced with JSON
+    headers.set("Content-Type", "application/json");
     return new Response(unwrapErrorBody(bodyText), { status, statusText, headers });
   }
 
@@ -423,507 +334,140 @@ async function forwardUpstreamResponse(
     const contentType = upstreamRes.headers.get("content-type") || "";
     const body = upstreamRes.body;
     if (body && contentType.includes("text/event-stream")) {
-      return new Response(rewriteSseReasoningField(body, compat.responseReasoningField), {
-        status,
-        statusText,
-        headers,
-      });
+      return new Response(rewriteSseReasoningField(body, compat.responseReasoningField), { status, statusText, headers });
     }
     if (contentType.includes("application/json")) {
       let bodyText: string;
       try {
         bodyText = await upstreamRes.text();
       } catch (err) {
-        return upstreamBodyReadFailure(upstreamRes, endpoint.id, upstreamCalls, err);
+        return upstreamBodyReadFailure(headers, err);
       }
-      return new Response(rewriteJsonReasoningField(bodyText, compat.responseReasoningField), {
-        status,
-        statusText,
-        headers,
-      });
+      return new Response(rewriteJsonReasoningField(bodyText, compat.responseReasoningField), { status, statusText, headers });
     }
   }
 
   return new Response(upstreamRes.body, { status, statusText, headers });
 }
 
-function authFailedResponse(upstreamCalls: number, endpointId?: string): Response {
-  const headers: Record<string, string> = { "Content-Type": "application/json", "X-Gateway-Attempt": String(upstreamCalls) };
-  if (endpointId) headers["X-Gateway-Active-Endpoint"] = endpointId;
-  return new Response(
-    JSON.stringify({
-      error: {
-        message: endpointId
-          ? "The upstream endpoint rejected the gateway's credentials."
-          : "All attempted upstream endpoints rejected the gateway's credentials.",
-        type: "gateway_error",
-        code: "upstream_auth_failed",
-      },
-    }),
-    {
-      status: 502,
-      headers,
-    }
-  );
+function listModels(config: GatewayConfig): Response {
+  return Response.json({
+    object: "list",
+    data: Object.keys(config.models).map((id) => ({ id, object: "model", owned_by: "deepseek-latch-gateway" })),
+  });
 }
 
-function failedAttemptsResponse(networkFailures: string[], authOnly: boolean, upstreamCalls: number): Response {
-  if (authOnly) {
-    console.error(`[Upstream Auth Failed] ${networkFailures.join("; ")}`);
-    return authFailedResponse(upstreamCalls);
+/** DeepSeek official chat completions accept only `response_format: {type: "json_object"}` or `null`. */
+function responseFormatError(body: Record<string, unknown>): Response | undefined {
+  const responseFormat = body.response_format;
+  if (responseFormat === undefined || responseFormat === null) return undefined;
+  if (typeof responseFormat === "object" && (responseFormat as { type?: unknown }).type === "json_object") return undefined;
+  let receivedType: string;
+  if (typeof responseFormat === "object") {
+    const type = (responseFormat as { type?: unknown }).type;
+    receivedType = type === undefined ? "<missing>" : JSON.stringify(type);
+  } else {
+    receivedType = typeof responseFormat;
   }
-  console.error(`[Upstream Unreachable] ${networkFailures.join("; ")}`);
-  return unreachableResponse("all attempted upstream endpoints unreachable", upstreamCalls);
+  return Response.json({
+    error: {
+      message: `response_format.type must be "json_object" (got ${receivedType}); json_schema is not part of the DeepSeek official contract this gateway exposes`,
+      type: "invalid_request_error",
+      param: "response_format",
+      code: "invalid_request_error",
+    },
+  }, { status: 400 });
 }
 
-function unreachableResponse(errorMsg: string, upstreamCalls: number, target: string = "upstream"): Response {
-  return new Response(
-    JSON.stringify({
-      error: {
-        message: `Gateway failed to connect to ${target}: ${errorMsg}`,
-        type: "gateway_error",
-        code: "upstream_unreachable",
-      },
-    }),
-    {
-      status: 502,
-      headers: { "Content-Type": "application/json", "X-Gateway-Attempt": String(upstreamCalls) },
-    }
-  );
-}
-
-async function handlePriorityProxyRequest(ctx: {
-  req: Request;
-  url: URL;
-  latch: PriorityLatchManager;
-  config: GatewayConfig;
-  model: string;
-  bodyText: string;
-}): Promise<Response> {
-  const { req, url, latch, config, model, bodyText } = ctx;
-  const method = req.method;
-  const pathWithQuery = url.pathname + url.search;
-  const maxAttempts = Math.max(config.strategy.maxRetriesPerRequest, latch.getRouteSize(model));
-  const rejected = new Set<string>();
-  const quotaRejected = new Set<string>();
-  const networkFailures: string[] = [];
-  let sawAuthFailure = false;
-  let sawNonAuthFailure = false;
-  const authRejected = new Set<string>();
-  let attempts = 0;
-  let fetchCalls = 0;
-
-  while (attempts < maxAttempts) {
-    const attempt = latch.getAttempt(model, rejected);
-    if (!attempt) break;
-    const endpoint = attempt.endpoint;
-    if (authRejected.has(endpoint.id)) {
-      rejected.add(attempt.key);
-      continue;
-    }
-    const targetUrl = buildTargetUrl(endpoint.baseUrl, pathWithQuery);
-    const modelMap = attempt.upstreamModel ? { [model]: attempt.upstreamModel } : undefined;
-    latch.recordRequest(model, attempt);
-
-    let networkError = "";
-    for (let inner = 0; inner < SAME_ENDPOINT_ATTEMPTS; inner++) {
-      try {
-        fetchCalls++;
-        const upstreamRes = await forwardToEndpoint(
-          endpoint,
-          req,
-          targetUrl,
-          method,
-          bodyText,
-          modelMap
-        );
-
-        if (upstreamRes.status === 429 || upstreamRes.status === 402) {
-          const errText = await upstreamRes.text();
-          networkError = "";
-          rejected.add(attempt.key);
-          quotaRejected.add(attempt.key);
-          latch.record429(model, attempt, retryAfterMs(upstreamRes.headers.get("retry-after")));
-          latch.advance(model, attempt, `Status ${upstreamRes.status}: ${errText.slice(0, 100)}`);
-          break;
-        }
-
-        if (!upstreamRes.ok) {
-          const errBody = await upstreamRes.clone().text();
-          if (isRateLimitOrQuotaError(upstreamRes.status, errBody)) {
-            networkError = "";
-            rejected.add(attempt.key);
-            quotaRejected.add(attempt.key);
-            latch.record429(model, attempt, retryAfterMs(upstreamRes.headers.get("retry-after")));
-            latch.advance(model, attempt, errBody.slice(0, 100));
-            break;
-          }
-          if (isCloudflare1010OrWafBlock(upstreamRes.status, errBody)) {
-            warnCloudflareBlock(endpoint.name, targetUrl, errBody);
-            networkError = "";
-            sawNonAuthFailure = true;
-            rejected.add(attempt.key);
-            networkFailures.push(`${endpoint.id}: Status 403 Cloudflare 1010 (${errBody.slice(0, 60)})`);
-            latch.recordNetworkFailure(model, attempt);
-            latch.advance(model, attempt, `Status 403 Cloudflare 1010: ${errBody.slice(0, 100)}`);
-            break;
-          }
-          if (upstreamRes.status === 401) {
-            const safeBody = reportAuthFailure(endpoint, targetUrl, upstreamRes, errBody);
-            networkError = "";
-            rejected.add(attempt.key);
-            sawAuthFailure = true;
-            authRejected.add(endpoint.id);
-            networkFailures.push(`${endpoint.id}: Status 401 (${safeBody.slice(0, 60)})`);
-            latch.recordNetworkFailure(model, attempt);
-            latch.advance(model, attempt, `Status 401: ${safeBody.slice(0, 100)}`);
-            break;
-          }
-          if (latch.isRecoveryProbe(model, attempt)) {
-            networkError = "";
-            sawNonAuthFailure = true;
-            rejected.add(attempt.key);
-            latch.recordNetworkFailure(model, attempt);
-            latch.advance(model, attempt, `Status ${upstreamRes.status}: ${errBody.slice(0, 100)}`);
-            break;
-          }
-        }
-
-        if (upstreamRes.ok) latch.recordSuccess(model, attempt);
-        latch.finishRequest(model, rejected);
-        return await forwardUpstreamResponse(upstreamRes, endpoint, fetchCalls);
-      } catch (err: unknown) {
-        networkError = (err as Error)?.message || String(err);
-        console.error(`\\x1b[31m[Fetch Error]\\x1b[0m Failed to reach ${endpoint.name} (${withoutQuery(targetUrl)}): ${networkError}`);
-      }
-    }
-
-    if (networkError) {
-      sawNonAuthFailure = true;
-      rejected.add(attempt.key);
-      networkFailures.push(`${endpoint.id}: ${networkError}`);
-      latch.recordNetworkFailure(model, attempt);
-      latch.advance(model, attempt, networkError);
-    }
-    attempts++;
-  }
-
-  latch.finishRequest(model, rejected);
-  if (quotaRejected.size === 0 && networkFailures.length > 0) {
-    return failedAttemptsResponse(networkFailures, sawAuthFailure && !sawNonAuthFailure, fetchCalls);
-  }
-  return new Response(
-    JSON.stringify({
-      error: {
-        message: "All priority groups for this route are exhausted or rate-limited.",
-        type: "insufficient_quota",
-        code: 429,
-      },
-    }),
-    { status: 429, headers: { "Content-Type": "application/json", "X-Gateway-Attempt": String(fetchCalls) } }
-  );
+function retryAfterSeconds(router: Router, model: string): Record<string, string> {
+  const at = router.nextAvailableAt(model);
+  return at === undefined ? {} : { "Retry-After": String(Math.max(1, Math.ceil((at - Date.now()) / 1000))) };
 }
 
 export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Response> {
-  const { req, url, latch, config } = ctx;
-  const method = req.method;
+  const { req, url, router, config } = ctx;
   const pathWithQuery = url.pathname + url.search;
 
-  // Read request body once so we can replay/retry if needed
-  let rawBodyText = "";
-  if (method !== "GET" && method !== "HEAD") {
-    rawBodyText = await req.text();
+  if (req.method === "GET" && (url.pathname === "/v1/models" || url.pathname === "/models")) {
+    return listModels(config);
+  }
+  if (req.method !== "POST") {
+    return errorResponse(405, "invalid_request_error", "method_not_allowed", `${req.method} is not supported; send POST with a JSON body.`);
   }
 
-  // Parse once; all later steps (allowlist, contract check, alias rewrite,
-  // routing) reuse this object instead of re-parsing the same text.
-  const parsedBody = parseRequestBody(rawBodyText);
-  const originalModel = parsedBody?.model;
+  let body: unknown;
+  try {
+    body = JSON.parse(await req.text());
+  } catch {
+    body = undefined;
+  }
+  if (!body || typeof body !== "object" || Array.isArray(body) || typeof (body as { model?: unknown }).model !== "string") {
+    return errorResponse(400, "invalid_request_error", "missing_model", "Request body must be a JSON object with a string 'model'.");
+  }
+  const json = body as Record<string, unknown>;
+  const model = json.model as string;
+  if (!router.hasModel(model)) {
+    const allowed = Object.keys(config.models).join(", ");
+    console.warn(`[Model Rejected] ${model} (allowed: ${allowed})`);
+    return errorResponse(400, "invalid_request_error", "model_not_allowed", `Model not allowed: ${model}. Allowed models: ${allowed}`);
+  }
+  const formatError = responseFormatError(json);
+  if (formatError) return formatError;
 
-  // --- Model allowlist ---------------------------------------------------------
-  // Checked against the original (pre-alias) model: unknown models are rejected
-  // outright instead of being aliased or forwarded.
-  if (originalModel && config.models?.allow && config.models.allow.length > 0) {
-    if (!config.models.allow.includes(originalModel)) {
-      const allowed = config.models.allow.join(", ");
-      console.warn(`[Model Rejected] ${originalModel} (allowed: ${allowed})`);
-      return new Response(
-        JSON.stringify({
-          error: {
-            message: `Model not allowed: ${originalModel}. Allowed models: ${allowed}`,
-            type: "invalid_request_error",
-            code: "model_not_allowed",
-          },
-        }),
-        {
-          status: 400,
-          headers: { "Content-Type": "application/json" },
-        }
-      );
-    }
+  const deployments = router.available(model);
+  if (deployments.length === 0) {
+    return errorResponse(503, "gateway_error", "no_available_provider",
+      `Every provider for ${model} failed within the last 30 minutes and is cooling down.`, retryAfterSeconds(router, model));
   }
 
-  // --- Canonical contract strictness ------------------------------------------
-  // DeepSeek official chat completions only support
-  // `response_format: {type: "json_object"}` — never `json_schema` (official
-  // rejects it with invalid_request_error) — but accept `null` (official
-  // contract's way to opt out of JSON mode). Reject anything else at the
-  // router so no client can come to depend on an endpoint's out-of-contract
-  // capability (no upstream call is made).
-  if (parsedBody && parsedBody.json !== null && typeof parsedBody.json === "object") {
-    const responseFormat = parsedBody.json.response_format;
-    let receivedType: string;
-    if (responseFormat === null) {
-      receivedType = "null";
-    } else if (typeof responseFormat === "object") {
-      const type = (responseFormat as { type?: unknown }).type;
-      receivedType = type === undefined ? "<missing>" : JSON.stringify(type);
-    } else {
-      receivedType = typeof responseFormat;
-    }
-    if (
-      responseFormat !== undefined &&
-      responseFormat !== null &&
-      (typeof responseFormat !== "object" ||
-        (responseFormat as { type?: unknown }).type !== "json_object")
-    ) {
-      return new Response(
-        JSON.stringify({
-          error: {
-            message: `response_format.type must be "json_object" (got ${receivedType}); json_schema is not part of the DeepSeek official contract this gateway exposes`,
-            type: "invalid_request_error",
-            param: "response_format",
-            code: "invalid_request_error",
-          },
-        }),
-        {
-          status: 400,
-          headers: { "Content-Type": "application/json" },
-        }
-      );
-    }
-  }
-
-  const finalBodyText = rewriteRequestBody(parsedBody, rawBodyText, config);
-  const requestModel =
-    parsedBody && parsedBody.json !== null && typeof parsedBody.json === "object" && typeof parsedBody.json.model === "string"
-      ? parsedBody.json.model
-      : undefined;
-
-  if (latch instanceof PriorityLatchManager) {
-    const routedModel = requestModel || latch.getDefaultModel();
-    if (!latch.hasRoute(routedModel)) {
-      return new Response(
-        JSON.stringify({
-          error: {
-            message: `No priority route configured for model: ${routedModel}`,
-            type: "invalid_request_error",
-            code: "route_not_configured",
-          },
-        }),
-        { status: 400, headers: { "Content-Type": "application/json" } }
-      );
-    }
-    return handlePriorityProxyRequest({
-      req,
-      url,
-      latch,
-      config,
-      model: routedModel,
-      bodyText: finalBodyText,
-    });
-  }
-
-  // --- Model-based dedicated routing -------------------------------------------
-  // An endpoint declaring `models` handles those incoming models exclusively
-  // (bypasses the RS-Latch pool). Others fall through to the latch pool below.
-  if (requestModel) {
-    const dedicated = config.endpoints.find((ep) => ep.models?.includes(requestModel));
-    if (dedicated) {
-      const targetUrl = buildTargetUrl(dedicated.baseUrl, pathWithQuery);
-      latch.recordRequestFor(dedicated.id);
-      try {
-        const upstreamRes = await forwardToEndpoint(
-          dedicated,
-          req,
-          targetUrl,
-          method,
-          finalBodyText,
-          dedicated.modelMap
-        );
-        if (upstreamRes.ok) {
-          latch.recordSuccessFor(dedicated.id);
-        } else {
-          const errBody = await upstreamRes.clone().text();
-          if (isRateLimitOrQuotaError(upstreamRes.status, errBody)) {
-            latch.record429For(dedicated.id, `Status ${upstreamRes.status}`);
-          } else if (upstreamRes.status === 401) {
-            reportAuthFailure(dedicated, targetUrl, upstreamRes, errBody);
-            return authFailedResponse(1, dedicated.id);
-          }
-        }
-        return await forwardUpstreamResponse(upstreamRes, dedicated, 1);
-      } catch (err: unknown) {
-        const errorMsg = (err as Error)?.message || String(err);
-        console.error(`\x1b[31m[Fetch Error]\x1b[0m Failed to reach ${dedicated.name} (${withoutQuery(targetUrl)}): ${errorMsg}`);
-        return unreachableResponse(errorMsg, 1, "dedicated upstream");
+  let upstreamCalls = 0;
+  for (const deployment of deployments) {
+    const provider = config.providers[deployment.provider];
+    const targetUrl = buildTargetUrl(provider.baseUrl, pathWithQuery);
+    let sessionId: string | undefined;
+    if (isOpenCode(targetUrl)) {
+      sessionId = openCodeSessionId(req, json);
+      if (!sessionId) {
+        return errorResponse(400, "invalid_request_error", "missing_session_id",
+          "Send x-opencode-session with a stable conversation ID when no opening user message is available.");
       }
     }
-  }
+    const init = {
+      method: "POST",
+      headers: buildUpstreamHeaders(req, provider, sessionId),
+      body: buildUpstreamBody(json, provider, deployment),
+      signal: req.signal,
+    };
+    router.recordRequest(deployment);
 
-  // --- RS-Latch failover pool --------------------------------------------------
-  const maxRetries = Math.min(config.strategy.maxRetriesPerRequest, latch.getPoolSize());
-  const poolSize = latch.getPoolSize();
-  // Endpoints already rejected with 429/402 in THIS request: never re-try them,
-  // even when the latch flip was debounced and activeIndex did not move.
-  const quotaRejected = new Set<number>();
-  // Endpoints that failed twice with network errors in THIS request: skip them
-  // too, so a down endpoint cannot starve the retry budget for healthy peers.
-  const networkSkipped = new Set<number>();
-  // Aggregated `endpoint: error` summaries for the final 502 (if any).
-  const networkFailures: string[] = [];
-  let sawAuthFailure = false;
-  let sawNonAuthFailure = false;
-  // Invariant: every loop iteration below adds at least one index to a skip
-  // set (or returns), and maxRetries <= poolSize, so at least one un-skipped
-  // endpoint always exists when the advance loop runs.
-  let attempts = 0;
-  let fetchCalls = 0; // monotonic upstream attempt counter for X-Gateway-Attempt
-
-  while (attempts < maxRetries) {
-    // Pick this attempt's endpoint: start from the latch's active index, but
-    // advance past endpoints this request already saw fail. Bounded by
-    // poolSize as a defensive guard on the skip-set invariant above.
-    let currentIndex = latch.getActiveIndex();
-    for (let guard = 0; guard < poolSize; guard++) {
-      if (!quotaRejected.has(currentIndex) && !networkSkipped.has(currentIndex)) break;
-      currentIndex = (currentIndex + 1) % poolSize;
-    }
-
-    const endpoint = latch.getEndpointByIndex(currentIndex);
-    latch.recordRequest(currentIndex);
-
-    const targetUrl = buildTargetUrl(endpoint.baseUrl, pathWithQuery);
-
-    let networkError = "";
-    // One original attempt plus one free same-endpoint retry for transient
-    // network failures. Retrying a non-idempotent request can in theory
-    // execute an upstream call twice when a connection drops after the
-    // provider accepted it; however a fetch rejection here means NO response
-    // headers were ever received, so nothing was relayed to the client, and
-    // an LLM client re-issues the whole request on any error anyway — the
-    // retry never increases total quota consumption vs. the no-retry path,
-    // it only succeeds faster. Refusing to retry would strand the healthy key
-    // behind a latch sitting on an exhausted peer (the reported bug).
-    for (let inner = 0; inner < SAME_ENDPOINT_ATTEMPTS; inner++) {
+    let failure = "";
+    for (let attempt = 0; attempt < SAME_PROVIDER_ATTEMPTS; attempt++) {
+      let upstreamRes: Response;
       try {
-        fetchCalls++;
-        const upstreamRes = await forwardToEndpoint(
-          endpoint,
-          req,
-          targetUrl,
-          method,
-          finalBodyText,
-          endpoint.modelMap
-        );
-
-        // Check if upstream returned rate limit / quota error
-        if (upstreamRes.status === 429 || upstreamRes.status === 402) {
-          const errText = await upstreamRes.text();
-          console.warn(
-            `\x1b[31m[Upstream 429]\x1b[0m ${endpoint.name} (${targetUrl}) returned status ${upstreamRes.status}: ${errText.slice(0, 150)}`
-          );
-
-          networkError = ""; // definitive response supersedes any network error
-          quotaRejected.add(currentIndex);
-          latch.trigger429(currentIndex, `Status ${upstreamRes.status}: ${errText.slice(0, 100)}`);
-          break; // next while iteration advances to the next endpoint
-        }
-
-        // If response is not 200 OK, check if the error body reveals quota limit
-        if (!upstreamRes.ok) {
-          const cloned = upstreamRes.clone();
-          const errBody = await cloned.text();
-          if (isRateLimitOrQuotaError(upstreamRes.status, errBody)) {
-            console.warn(
-              `\x1b[31m[Upstream Quota Error]\x1b[0m ${endpoint.name} returned quota error in status ${upstreamRes.status}: ${errBody.slice(0, 150)}`
-            );
-            networkError = ""; // definitive response supersedes any network error
-            quotaRejected.add(currentIndex);
-            latch.trigger429(currentIndex, errBody.slice(0, 100));
-            break;
-          }
-          if (isCloudflare1010OrWafBlock(upstreamRes.status, errBody)) {
-            warnCloudflareBlock(endpoint.name, targetUrl, errBody);
-            networkError = "";
-            sawNonAuthFailure = true;
-            networkSkipped.add(currentIndex);
-            networkFailures.push(`${endpoint.id}: Status 403 Cloudflare 1010 (${errBody.slice(0, 60)})`);
-            latch.advanceOnNetworkFailure(currentIndex, `Status 403 Cloudflare 1010: ${errBody.slice(0, 100)}`);
-            break;
-          }
-          if (upstreamRes.status === 401) {
-            const safeBody = reportAuthFailure(endpoint, targetUrl, upstreamRes, errBody);
-            networkError = "";
-            networkSkipped.add(currentIndex);
-            sawAuthFailure = true;
-            networkFailures.push(`${endpoint.id}: Status 401 (${safeBody.slice(0, 60)})`);
-            latch.advanceOnNetworkFailure(currentIndex, `Status 401: ${safeBody.slice(0, 100)}`);
-            break;
-          }
-        }
-
-        // Success or standard client error (e.g. 400 bad prompt)
-        if (upstreamRes.ok) {
-          latch.recordSuccess(currentIndex);
-        }
-
-        return await forwardUpstreamResponse(upstreamRes, endpoint, fetchCalls);
+        upstreamCalls++;
+        upstreamRes = await fetch(targetUrl, init);
       } catch (err: unknown) {
-        networkError = (err as Error)?.message || String(err);
-        console.error(`\x1b[31m[Fetch Error]\x1b[0m Failed to reach ${endpoint.name} (${withoutQuery(targetUrl)}): ${networkError}`);
-        // Network/fetch failures are NOT quota exhaustion: never flip the
-        // RS-Latch on a single transient failure (a hiccup is retried above; a
-        // flip would strand all traffic on the exhausted peer and surface false
-        // "insufficient_quota" errors). Only after the endpoint fails twice is
-        // it treated as down and the latch advanced (see below).
+        if (req.signal.aborted) throw err;
+        failure = (err as Error)?.message || String(err);
+        console.error(`\x1b[31m[Fetch Error]\x1b[0m Failed to reach ${provider.id} (${withoutQuery(targetUrl)}): ${failure}`);
+        continue;
       }
+      if (!upstreamRes.ok) {
+        const errBody = await upstreamRes.clone().text();
+        if (isProviderFailure(upstreamRes.status, errBody)) {
+          void upstreamRes.body?.cancel().catch(() => {});
+          failure = `Status ${upstreamRes.status}: ${redactCredentials(errBody, provider).slice(0, 150)}`;
+          break;
+        }
+      } else {
+        router.recordSuccess(deployment);
+      }
+      return forwardUpstreamResponse(upstreamRes, provider, deployment, upstreamCalls);
     }
-
-    if (networkError) {
-      // The endpoint failed on both attempts: it is plausibly down, not just
-      // hiccuping — skip it for the rest of this request and advance the latch
-      // (debounced) so subsequent requests start from the next endpoint.
-      sawNonAuthFailure = true;
-      networkFailures.push(`${endpoint.id}: ${networkError}`);
-      networkSkipped.add(currentIndex);
-      latch.advanceOnNetworkFailure(currentIndex, networkError);
-    }
-    attempts++;
-
-    if (attempts >= maxRetries && (networkError || networkSkipped.size > 0) && quotaRejected.size === 0) {
-      // If the final endpoint was unreachable AND no endpoint ever gave a
-      // definitive 429/quota verdict, report the connectivity failure (502).
-      // A definitive quota verdict always wins (429).
-      // Detailed per-endpoint failures stay server-side: the client only
-      // needs a generic connectivity error, not the pool topology.
-      return failedAttemptsResponse(networkFailures, sawAuthFailure && !sawNonAuthFailure, fetchCalls);
-    }
-    // Otherwise fall through to the 429 response below (loop exits naturally).
+    router.recordFailure(deployment, failure);
   }
 
-  // All endpoints exhausted with 429
-  return new Response(
-    JSON.stringify({
-      error: {
-        message: "All configured endpoints exhausted or rate-limited (RS-Latch full cycle).",
-        type: "insufficient_quota",
-        code: 429,
-      },
-    }),
-    {
-      status: 429,
-      headers: { "Content-Type": "application/json", "X-Gateway-Attempt": String(fetchCalls) },
-    }
-  );
+  return errorResponse(503, "gateway_error", "no_available_provider",
+    `Every available provider for ${model} failed; each is paused for 30 minutes.`,
+    { ...retryAfterSeconds(router, model), "X-Gateway-Attempt": String(upstreamCalls) });
 }

@@ -30,7 +30,7 @@ Mac 的 SHA-256 必須在簽章之後計算。Windows build 是額外步驟，�
 每次改版都必須：
 
 1. 核對 live executable path、supervisor、port 與既有連線，不能只沿用舊機器清單。
-2. 保留各機 config、routing、launcher、憑證與 supervisor 定義；binary-only 更新不得複製範例設定覆蓋它們。
+2. 保留各機 config、launcher、憑證與 supervisor 定義；binary-only 更新不得複製範例設定覆蓋它們。
 3. 在正式路徑外測試候選 binary，核對 SHA-256，備份並驗證舊 binary。
 4. 將候選檔複製到正式 binary 的同目錄暫存檔，再原子替換；不要直接覆寫正在執行的檔案。
 5. 等該 Gateway 的 established 連線清空後，只重啟該 Gateway；保留 HAPI Runner 與其他工作階段。
@@ -77,7 +77,7 @@ curl -fsS http://127.0.0.1:35001/health
 ## 4. swop（Windows SYSTEM 排程）
 
 正式 launcher 為 `%ProgramData%\DeepSeekGateway\deepseek-gateway-system.ps1`。
-保留 SYSTEM principal、BootTrigger、排程 XML、config/routing 與 LocalMachine
+保留 SYSTEM principal、BootTrigger、排程 XML、config 與 LocalMachine
 DPAPI credentials。不要切換成登入使用者的臨時程序。
 
 1. 先對 Windows 候選 exe 執行隔離的 header 封包測試，核對 hash。
@@ -87,6 +87,17 @@ DPAPI credentials。不要切換成登入使用者的臨時程序。
 5. 啟動原排程，確認新 PID、正式 executable path、兩份 binary hash、health，以及設定與排程 XML 未變。失敗則恢復已驗證的備份，再啟動原排程。
 
 ## 驗證邊界與最新部署紀錄
+
+### 設定格式遷移（2026-10-25 簡化 router）
+
+新版只讀單一 `config.yaml`（`providers` + `models`）；舊的 `endpoints` 清單與
+`routing.yaml` 會在啟動時被拒絕（`'providers' must map provider ids to settings`）。
+換 binary 前必須先把該機 live config 轉成新格式：每個舊 endpoint 變成
+`providers.<id>`（保留 `base_url`、`api_key` 的 `${VAR}`、`compat`、`extra_body`、
+`extra_headers`；`name`、`weight`、`models`、`model_map` 不再使用），`models` 依
+`config.example.yaml` 只留 `deepseek-flash` 與 `deepseek-pro`，`server` 保留該機的
+port。舊 `routing.yaml` 改名備份即可，新版不讀。binary 與 config 必須一起換：
+舊 binary 讀不了新格式，新 binary 讀不了舊格式。
 
 2026-10-25（台灣時間）部署 PR #21（merge `8a9e06f`）的設定變更，binary 不變：
 `deepseek-flash` 的 OpenRouter fallback 改為 `deepseek/deepseek-v4.1-flash-1017`，
@@ -218,9 +229,10 @@ ssh <host> 'cd /tmp && env -i HOME=$HOME PATH=<node-bin>:/usr/bin:/bin TERM=xter
 
 - [ ] 確認八台清單、正式 executable、supervisor 與 port。
 - [ ] 建置四平台 binary，Mac 簽章後記錄 SHA-256。
-- [ ] 候選原生 header 測試通過；各機舊版備份及 config/routing hash 已保存。
+- [ ] 候選原生 header 測試通過；各機舊版備份及 config hash 已保存。
 - [ ] Mac、四台 NFS hosts、Oracle、Zeus、swop 全數安裝並在連線清空後重啟。
 - [ ] 八台新程序、binary hash、health、真實推論已驗證，記錄實際 upstream。
+- [ ] 各機以該機 config 執行 `check-latest`（需該機 `.secrets`），全部 `ok`。
 - [ ] swop 正式與 user-local 副本一致，SYSTEM 排程及憑證保持原樣。
 - [ ] 若動到 dsh key 名稱，執行 5.3／5.4 並更新相關 dsh 程序。
 - [ ] 清理自己的 staging／worktree；保留已驗證的回復備份。

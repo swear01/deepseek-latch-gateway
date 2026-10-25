@@ -3,46 +3,33 @@ server:
   port: 35001
   timeout_seconds: 120
 
-strategy:
-  mode: "latch"
-  debounce_seconds: 1.0
-  max_retries_per_request: 4
-
-# Provider/runtime settings only. Model priority and upstream model names live
-# in routing.yaml so the provider definitions can be reused by multiple routes.
-endpoints:
-  - id: "command-code"
-    name: "Command Code"
+# Upstream connection settings. A provider that fails (quota, credentials,
+# block, 5xx, network) for one model is not contacted for that model again
+# for 30 minutes.
+providers:
+  opencode-go-1:
+    base_url: "https://opencode.ai/zen/go/v1"
+    api_key: "${OPENCODE_API_KEY_1}"
+    compat:
+      strip_response_format: true
+  opencode-go-2:
+    base_url: "https://opencode.ai/zen/go/v1"
+    api_key: "${OPENCODE_API_KEY_2}"
+    compat:
+      strip_response_format: true
+  opencode-go-3:
+    base_url: "https://opencode.ai/zen/go/v1"
+    api_key: "${OPENCODE_API_KEY_3}"
+    compat:
+      strip_response_format: true
+  command-code:
     base_url: "https://api.commandcode.ai/provider/v1"
     api_key: "${COMMAND_CODE_API_KEY}"
     compat:
       strip_response_format: true
       response_reasoning_field: "reasoning"
       unwrap_error: true
-
-  - id: "opencode-go-1"
-    name: "OpenCode Go (Account 1)"
-    base_url: "https://opencode.ai/zen/go/v1"
-    api_key: "${OPENCODE_API_KEY_1}"
-    compat:
-      strip_response_format: true
-
-  - id: "opencode-go-2"
-    name: "OpenCode Go (Account 2)"
-    base_url: "https://opencode.ai/zen/go/v1"
-    api_key: "${OPENCODE_API_KEY_2}"
-    compat:
-      strip_response_format: true
-
-  - id: "opencode-go-3"
-    name: "OpenCode Go (Account 3)"
-    base_url: "https://opencode.ai/zen/go/v1"
-    api_key: "${OPENCODE_API_KEY_3}"
-    compat:
-      strip_response_format: true
-
-  - id: "openrouter"
-    name: "OpenRouter (fast capped)"
+  openrouter:
     base_url: "https://openrouter.ai/api/v1"
     api_key: "${OPENROUTER_API_KEY}"
     extra_body:
@@ -60,9 +47,16 @@ endpoints:
           - "io.net"
         allow_fallbacks: true
 
+# Public model ids. Each request uses the first listed deployment that is
+# not cooling down. Always name each provider's newest DeepSeek
+# model, never a dated snapshot; `bun run check-latest` verifies this live.
 models:
-  allow:
-    - "deepseek-flash"
-    - "deepseek-pro"
-    - "deepseek-v4.1-flash-1017"
-    - "deepseek-v4-pro"
+  deepseek-flash:
+    - { provider: opencode-go-1, model: "deepseek-v4.1-flash" }
+    - { provider: opencode-go-2, model: "deepseek-v4.1-flash" }
+    - { provider: opencode-go-3, model: "deepseek-v4.1-flash" }
+    - { provider: command-code, model: "deepseek/deepseek-v4.1-flash" }
+    - { provider: openrouter, model: "~deepseek/deepseek-flash-latest" }
+  deepseek-pro:
+    - { provider: command-code, model: "deepseek/deepseek-v4-pro" }
+    - { provider: openrouter, model: "~deepseek/deepseek-pro-latest" }

@@ -2,30 +2,41 @@
 
 ## Key Design Rationale
 
-### 1. Why hierarchical RS-Latch instead of a flat pool?
-Generic load balancers alternate requests between all keys. When accounts have
-usage limits, that can exhaust every account concurrently. The gateway keeps an
-inner RS-Latch for the highest-priority OpenCode group, so later accounts are
-untouched until the active account fails. Only when the whole group is
-exhausted does the outer route enter the lower-priority Command Code group.
+### 1. Why an ordered list with cooldown instead of priority groups and latches?
+Generic load balancers alternate requests between all keys, which can exhaust
+every subscription account at once. An ordered list gives the same "stay on the
+first working account" behavior: later deployments are only used while earlier
+ones are cooling down. The earlier design (priority groups, an inner RS-Latch per
+group, a debounced pointer, half-open probes, exponential cooldowns and a
+separate `routing.yaml`) produced the same order with far more state, and let
+one public model id map to different snapshots per fallback. It was replaced on
+2026-10-25 by LiteLLM's shape: one public name, ordered deployments, cooldown.
 
-### 2. Debounced Concurrency
-When a high-concurrency burst occurs (e.g. Swear Review OCR spawning multiple concurrent requests or DeepSeek Harness running batches), multiple requests may receive 429 at the exact same millisecond.
-Without a debounce window, 10 concurrent 429s would increment the pointer 10 times, cycling through the entire key pool immediately.
-The gateway maintains `lastSwitchTimestamp` with a configurable debounce window (default 1.0s). Concurrent 429s from the same old index will adopt the new index and retry without advancing the pointer again.
+### 2. Cooldown is flat, per deployment, and also covers network failures
+Any provider failure pauses that deployment (provider + model) for 30 minutes;
+the next request after that tries it again. Because state is per deployment,
+concurrent failures just rewrite the same expiry, so no debounce is needed, and
+a model missing on one provider does not block that provider's other models.
+A single network failure is retried once on the same provider first, so one
+dropped connection does not cost 30 minutes. When everything is cooling down
+the client gets 503 with `Retry-After` instead of the gateway poking a provider
+inside its cooldown.
 
 ### 3. In-Flight Retry Guarantee
-The client request body is read once into memory before upstream forwarding. If the initial upstream request fails with 429 at the HTTP status header stage, the connection is discarded before any downstream headers are sent to the client. The request is immediately retried on the newly switched key, making the failover 100% transparent to the client.
+The client request body is read once into memory before upstream forwarding. If
+an upstream fails at the HTTP status stage, its response is discarded before any
+downstream headers are sent, and the request is retried on the next deployment,
+so failover is transparent to the client.
 
 ### 4. Zero-Copy Streaming
 Once upstream responds with `200 OK`, `upstreamResponse.body` is streamed directly to the client response stream. DeepSeek `reasoning_content` and SSE event chunks are preserved without deserialization overhead.
 
 ## Official Contract & Compat Gotchas (實測 2026-08-16)
 
-### 5. Client-facing contract is DeepSeek official — endpoints declare deviations
+### 5. Client-facing contract is DeepSeek official — providers declare deviations
 Clients always send official-shape requests (`response_format: {type:"json_object"}`,
-`thinking`, `reasoning_effort`); per-endpoint `compat` bridges deviations at the
-proxy layer. Never ask a client to work around an endpoint (e.g. harness
+`thinking`, `reasoning_effort`); per-provider `compat` bridges deviations at the
+proxy layer. Never ask a client to work around a provider (e.g. harness
 `VGUIDE_LLM_JSON_MODE=off` is obsolete once compat is deployed).
 
 ### 6. Upstream deviation matrix (empirical)
@@ -43,7 +54,7 @@ Consequences:
 - Command Code emits `reasoning` deltas **even when `thinking: {"type":"disabled"}`**; the SSE rewrite handles them regardless.
 
 ### 7. SSE rewriting is conservative
-Only endpoints declaring `response_reasoning_field` get the `TransformStream`
+Only providers declaring `response_reasoning_field` get the `TransformStream`
 line rewrite. Lines that fail JSON parse (incl. `data: [DONE]`) pass through
 verbatim; `\r` is stripped per line; chunk boundaries are buffered so events
 split across TCP chunks still rewrite correctly.
@@ -62,44 +73,37 @@ call, so no client can depend on out-of-contract endpoint capability.
 ### 10. OpenCode Go account usage limits
 OpenCode Go answers subscription quota exhaustion with a **429 JSON body**
 (`{"type":"error","error":{"type":"GoUsageLimitError","message":"Weekly usage
-limit reached..."}}`, not SSE) — `isRateLimitOrQuotaError` matches status 429
-and `weekly usage limit` so the latch still flips. Key 1 was
-observed at weekly limit while key 2 stayed healthy.
+limit reached..."}}`, not SSE). Key 1 was observed at weekly limit while key 2
+stayed healthy.
 
 Zen **balance** exhaustion is a different shape: HTTP **401**
 (`{"type":"error","error":{"type":"CreditsError","message":"Insufficient
-balance..."}}`). That is also quota. The classifier matches `creditserror` and
-`insufficient balance` so the request latches instead of forwarding 401; a 401
-carrying any other quota marker the classifier knows takes the same path. Any
-other 401 (for example `api_key_expired` after the October 2026 OpenCode key
-revocation) is treated as an endpoint failure, not quota: the endpoint is
-skipped without a quota cooldown and the request moves to the next member.
-If every attempted endpoint fails this way, the client receives 502 `upstream_auth_failed`, never the raw 401. A dedicated-model endpoint has no peer to try, so its 401 returns 502 `upstream_auth_failed` immediately.
+balance..."}}`). An expired key (`api_key_expired`, after the October 2026
+OpenCode key revocation) is also a 401. An inactive Go subscription returns
+HTTP **403** with `An active OpenCode Go subscription is required to use Go
+models.` All of these are provider failures: the deployment cools down for 30
+minutes and the request moves to the next one. Ordinary permission-denied 403
+responses still reach the client unchanged.
 
-An inactive Go subscription returns HTTP **403** with `An active OpenCode Go
-subscription is required to use Go models.` The shared classifier recognizes
-that specific message and advances to the next configured account with the
-quota cooldown, in both priority and flat routing. Ordinary permission-denied
-403 responses still reach the client without switching accounts.
+### 11. One configuration file
 
-### 11. Provider and routing configuration are separate
+`config.yaml` holds `providers` (connection and compat settings) and `models`
+(public id -> ordered deployments). A provider can appear under several models
+with different upstream model names; Command Code serves both Flash and Pro.
+The model keys double as the allowlist. The old `endpoints` list and
+`routing.yaml` are rejected at startup.
 
-`config.yaml` defines provider endpoints and compatibility behavior. `routing.yaml`
-defines model routes, explicit numeric priorities, per-group latch membership,
-and route-level `upstream_model` names. A provider may be referenced by more
-than one route; Command Code is shared by Flash fallback and Pro routing.
+### 12. "Newest DeepSeek" is checked, not pinned
 
-### 12. Priority recovery uses a half-open circuit breaker
-
-Quota failures block each endpoint independently for 1.5 hours, then 3, 6, 12,
-and at most 24 hours after repeated failed probes. A shorter upstream
-`Retry-After` accelerates that calculated delay but never extends it. OpenCode
-can emit retry delays lasting weeks, which would otherwise defeat periodic
-recovery probes. After expiry, the next real
-request owns one half-open recovery probe; concurrent requests keep using the
-fallback. Success immediately restores the higher-priority group, while
-failure completes through the fallback and starts the next cooldown. Network
-failures use the same mechanism with a 30-second base and 15-minute cap.
+OpenCode Go and Command Code list only undated names (`deepseek-v4.1-flash`,
+`deepseek/deepseek-v4-pro`), so the gateway cannot pin or verify their snapshot
+dates. OpenRouter lists dated snapshots; its undated `deepseek/deepseek-v4.1-flash`
+is the 0910 release, while `~deepseek/deepseek-flash-latest` resolved to
+`deepseek/deepseek-v4.1-flash-1017` and `~deepseek/deepseek-pro-latest` to
+`deepseek/deepseek-v4-pro-0813` on 2026-10-25. `check-latest` treats the
+newest entry as the highest version, then the most recent `created` time.
+With the existing `max_price` cap ($0.15 / $0.60 per M), pro-latest is served
+by Baidu.
 
 ### 13. Oracle ARM64 build target is pinned
 
@@ -124,12 +128,11 @@ an auto-restart may execute the partially written file. Stage the complete
 binary in `/tmp`, set its mode, then use `mv` to replace the path atomically
 before restarting the service.
 
-### 16. Outbound User-Agent normalization and 403 endpoint block failover
+### 16. Outbound User-Agent normalization and 403 block failover
 
 OpenCode Go / Cloudflare blocks requests with generic library User-Agents such as
 `Python-urllib/*` with HTTP 403 / Cloudflare Error 1010. The gateway normalizes
 missing or generic library User-Agents to `aisimpv-gateway/1.0`, while preserving
 explicit custom agent User-Agents. In addition, HTTP 403 / Cloudflare 1010 is
-classified as an endpoint failure, placing the failed endpoint into temporary
-cooldown (30-second base backoff) and immediately failing over to the next
-provider instead of aborting the request.
+a provider failure: the deployment cools down for 30 minutes and the request
+fails over to the next deployment instead of aborting.

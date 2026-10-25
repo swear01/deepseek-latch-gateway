@@ -1,8 +1,6 @@
-import { readFileSync, existsSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { readFileSync } from "node:fs";
 import { parse as parseYaml } from "yaml";
-import type { GatewayConfig, EndpointConfig } from "./types";
-import { loadRoutingConfig, validateRoutingConfig } from "./routing";
+import type { Deployment, GatewayConfig, ProviderConfig } from "./types";
 
 function interpolateEnv(str?: string): string {
   if (!str) return "";
@@ -16,155 +14,91 @@ function interpolateEnv(str?: string): string {
   });
 }
 
-interface RawCompatConfig {
-  stripResponseFormat?: boolean;
-  strip_response_format?: boolean;
-  responseReasoningField?: string;
-  response_reasoning_field?: string;
-  unwrapError?: boolean;
-  unwrap_error?: boolean;
-}
-
-interface RawEndpointConfig {
-  id?: string;
-  name?: string;
-  baseUrl?: string;
+interface RawProviderConfig {
   base_url?: string;
-  apiKey?: string;
   api_key?: string;
-  weight?: number;
-  models?: string[];
-  modelMap?: Record<string, string>;
-  model_map?: Record<string, string>;
-  extraBody?: Record<string, unknown>;
+  compat?: {
+    strip_response_format?: boolean;
+    response_reasoning_field?: string;
+    unwrap_error?: boolean;
+  };
+  extra_headers?: Record<string, string>;
   extra_body?: Record<string, unknown>;
-  compat?: RawCompatConfig;
 }
 
 interface RawGatewayConfig {
-  server?: {
-    host?: string;
-    port?: number;
-    timeoutSeconds?: number;
-    timeout_seconds?: number;
-  };
-  strategy?: {
-    mode?: "latch";
-    debounceSeconds?: number;
-    debounce_seconds?: number;
-    maxRetriesPerRequest?: number;
-    max_retries_per_request?: number;
-  };
-  endpoints?: RawEndpointConfig[];
-  models?: {
-    aliases?: Record<string, string>;
-    allow?: string[];
-  };
+  server?: { host?: string; port?: number; timeout_seconds?: number };
+  providers?: Record<string, RawProviderConfig>;
+  models?: Record<string, Array<{ provider?: string; model?: string }>>;
 }
 
-function resolveCompat(raw?: RawCompatConfig): EndpointConfig["compat"] {
-  if (!raw) return undefined;
-  const compat: NonNullable<EndpointConfig["compat"]> = {};
-  const stripResponseFormat = raw.stripResponseFormat ?? raw.strip_response_format;
-  if (stripResponseFormat !== undefined) compat.stripResponseFormat = stripResponseFormat;
-  const responseReasoningField = raw.responseReasoningField ?? raw.response_reasoning_field;
-  if (responseReasoningField !== undefined) compat.responseReasoningField = responseReasoningField;
-  const unwrapError = raw.unwrapError ?? raw.unwrap_error;
-  if (unwrapError !== undefined) compat.unwrapError = unwrapError;
-  return Object.keys(compat).length > 0 ? compat : undefined;
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
-function resolveEndpoint(raw: RawEndpointConfig, index: number): EndpointConfig {
-  const id = raw.id || `endpoint-${index + 1}`;
-  const rawBaseUrl = raw.baseUrl || raw.base_url || "https://opencode.ai/zen/go/v1";
-  const rawApiKey = raw.apiKey || raw.api_key || "";
-  return {
+function resolveProvider(id: string, raw: RawProviderConfig): ProviderConfig {
+  if (!raw || typeof raw !== "object" || typeof raw.base_url !== "string" || !raw.base_url) {
+    throw new Error(`Invalid configuration: providers.${id}.base_url is required.`);
+  }
+  const provider: ProviderConfig = {
     id,
-    name: raw.name ? interpolateEnv(raw.name) : id,
-    baseUrl: interpolateEnv(rawBaseUrl),
-    apiKey: interpolateEnv(rawApiKey),
-    weight: raw.weight,
-    models: raw.models,
-    modelMap: raw.modelMap || raw.model_map,
-    extraBody: raw.extraBody || raw.extra_body,
-    compat: resolveCompat(raw.compat),
+    baseUrl: interpolateEnv(raw.base_url),
+    apiKey: interpolateEnv(raw.api_key),
+  };
+  if (raw.compat) {
+    provider.compat = {
+      stripResponseFormat: raw.compat.strip_response_format,
+      responseReasoningField: raw.compat.response_reasoning_field,
+      unwrapError: raw.compat.unwrap_error,
+    };
+  }
+  if (raw.extra_headers) provider.extraHeaders = raw.extra_headers;
+  if (raw.extra_body) provider.extraBody = raw.extra_body;
+  return provider;
+}
+
+export function parseConfig(rawContent: string): GatewayConfig {
+  const parsed = (parseYaml(rawContent) || {}) as RawGatewayConfig;
+  if (!isRecord(parsed.providers) || Object.keys(parsed.providers).length === 0) {
+    throw new Error("Invalid configuration: 'providers' must map provider ids to settings.");
+  }
+  if (!isRecord(parsed.models) || Object.keys(parsed.models).length === 0) {
+    throw new Error("Invalid configuration: 'models' must map public model ids to deployment lists.");
+  }
+
+  const providers: Record<string, ProviderConfig> = Object.create(null);
+  for (const [id, raw] of Object.entries(parsed.providers)) {
+    providers[id] = resolveProvider(id, raw);
+  }
+
+  const models: Record<string, Deployment[]> = Object.create(null);
+  for (const [name, list] of Object.entries(parsed.models)) {
+    if (!Array.isArray(list) || list.length === 0) {
+      throw new Error(`Invalid configuration: models.${name} must be a non-empty list.`);
+    }
+    models[name] = list.map((entry, index) => {
+      if (!isRecord(entry) || typeof entry.provider !== "string" || typeof entry.model !== "string" || !entry.model) {
+        throw new Error(`Invalid configuration: models.${name}[${index}] needs 'provider' and 'model'.`);
+      }
+      if (!Object.hasOwn(providers, entry.provider)) {
+        throw new Error(`Invalid configuration: models.${name}[${index}] references unknown provider '${entry.provider}'.`);
+      }
+      return { provider: entry.provider, model: entry.model };
+    });
+  }
+
+  return {
+    server: {
+      host: parsed.server?.host || "127.0.0.1",
+      port: parsed.server?.port || 35001,
+      timeoutSeconds: parsed.server?.timeout_seconds || 120,
+    },
+    providers,
+    models,
   };
 }
 
 export function loadConfig(configPath?: string): GatewayConfig {
-  const defaultPath = process.env.GATEWAY_CONFIG || "./config.yaml";
-  const targetPath = configPath || defaultPath;
-  const routingPath = process.env.GATEWAY_ROUTING || join(dirname(targetPath), "routing.yaml");
-  const routing = (process.env.GATEWAY_ROUTING || existsSync(routingPath)) ? loadRoutingConfig(routingPath) : undefined;
-
-  let rawContent = "";
-  if (existsSync(targetPath)) {
-    rawContent = readFileSync(targetPath, "utf-8");
-  } else {
-    // If no config file found, fallback to env-based default
-    console.log(`[Config] No config file found at ${targetPath}, checking environment variables...`);
-    const endpoints: EndpointConfig[] = [];
-    for (const n of [1, 2, 3]) {
-      const apiKey = process.env[`OPENCODE_API_KEY_${n}`];
-      if (!apiKey) continue;
-      endpoints.push({
-        id: `opencode-go-${n}`,
-        name: `OpenCode Go (Account ${n})`,
-        baseUrl: process.env.OPENCODE_BASE_URL || "https://opencode.ai/zen/go/v1",
-        apiKey,
-      });
-    }
-
-    if (endpoints.length === 0) {
-      throw new Error(
-        "No endpoints configured. Provide a config.yaml or OPENCODE_API_KEY_1 environment variable."
-      );
-    }
-
-    if (routing) validateRoutingConfig(routing, endpoints.map((endpoint) => endpoint.id));
-    return {
-      server: {
-        host: process.env.HOST || "127.0.0.1",
-        port: parseInt(process.env.PORT || "35001", 10),
-        timeoutSeconds: 120,
-      },
-      strategy: {
-        mode: "latch",
-        debounceSeconds: 1.0,
-        maxRetriesPerRequest: endpoints.length,
-      },
-      endpoints,
-      routing,
-    };
-  }
-
-  const parsed = (parseYaml(rawContent) || {}) as RawGatewayConfig;
-
-  const endpoints = (parsed.endpoints || []).map(resolveEndpoint);
-  if (endpoints.length === 0) {
-    throw new Error("Invalid configuration: 'endpoints' array must contain at least one endpoint.");
-  }
-
-  if (routing) validateRoutingConfig(routing, endpoints.map((endpoint) => endpoint.id));
-
-  const config: GatewayConfig = {
-    server: {
-      host: parsed.server?.host || "127.0.0.1",
-      port: parsed.server?.port || 35001,
-      timeoutSeconds: parsed.server?.timeoutSeconds || parsed.server?.timeout_seconds || 120,
-    },
-    strategy: {
-      mode: parsed.strategy?.mode || "latch",
-      debounceSeconds: parsed.strategy?.debounceSeconds ?? parsed.strategy?.debounce_seconds ?? 1.0,
-      maxRetriesPerRequest:
-        parsed.strategy?.maxRetriesPerRequest ||
-        parsed.strategy?.max_retries_per_request ||
-        endpoints.length,
-    },
-    endpoints,
-    routing,
-    models: parsed.models || { aliases: {} },
-  };
-
-  return config;
+  const targetPath = configPath || process.env.GATEWAY_CONFIG || "./config.yaml";
+  return parseConfig(readFileSync(targetPath, "utf-8"));
 }

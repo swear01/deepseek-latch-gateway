@@ -10,8 +10,8 @@
 ### 2. Advanced Metrics & Telemetry
 - Prometheus `/metrics` endpoint exporting:
   - Token counts (input tokens, output tokens, prompt cache hit/miss).
-  - Latch flip counter and active index gauge.
+  - Failover and cooldown counters per deployment.
   - Per-endpoint latency percentiles (p50, p95, p99).
 
 ### 3. Notifications & Webhooks
-- Optional Discord / Telegram webhook notification on latch flips or when all keys are exhausted.
+- Optional Discord / Telegram webhook notification when a deployment cools down or every deployment of a model is unavailable.

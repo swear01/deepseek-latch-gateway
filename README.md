@@ -1,17 +1,80 @@
 # DeepSeek Latch Gateway
 
-A high-performance, ultra-lightweight AI Gateway tailored for **DeepSeek series models** and **OpenCode Go multi-account subscriptions**.
+A small OpenAI-compatible gateway for **DeepSeek models** across OpenCode Go
+accounts, Command Code and OpenRouter. Clients ask for `deepseek-flash` or
+`deepseek-pro`; the gateway tries that model's upstreams in order and always
+targets each provider's newest DeepSeek model.
 
-Features a stateful **RS-Latch (Bistable Sticky Failover)** mechanism that completely eliminates rate-limit probing penalties and delivers seamless, zero-interruption in-session key rotation.
+The configuration follows LiteLLM's shape (one public model name, an ordered
+list of deployments, cooldown on failure), implemented as a single Bun binary.
 
 ---
+
+## Configuration
+
+One file, `config.yaml`:
+
+```yaml
+providers:
+  opencode-go-1: { base_url: "https://opencode.ai/zen/go/v1", api_key: "${OPENCODE_API_KEY_1}", compat: { strip_response_format: true } }
+  command-code:  { base_url: "https://api.commandcode.ai/provider/v1", api_key: "${COMMAND_CODE_API_KEY}", compat: { ... } }
+  openrouter:    { base_url: "https://openrouter.ai/api/v1", api_key: "${OPENROUTER_API_KEY}", extra_body: { provider: { ... } } }
+
+models:
+  deepseek-flash:
+    - { provider: opencode-go-1, model: "deepseek-v4.1-flash" }
+    - { provider: command-code, model: "deepseek/deepseek-v4.1-flash" }
+    - { provider: openrouter, model: "~deepseek/deepseek-flash-latest" }
+```
+
+See `config.example.yaml` for the full fleet configuration. The keys of
+`models` are the only model ids the gateway accepts; anything else gets
+400 `model_not_allowed`.
+
+## Routing and cooldown
+
+- Each request uses the first deployment of its model that is not cooling
+  down, so later deployments stay untouched while an earlier one works.
+- A deployment that fails is skipped for **30 minutes**, then tried again by
+  the next request. Failures are: 429/402 and quota messages (including
+  OpenCode `CreditsError` 401 and the inactive-subscription 403), any other
+  401, Cloudflare 1010 403, 408, 5xx, and network errors. A network error is
+  retried once on the same provider before it counts.
+- Other 4xx responses (bad request, ordinary 403, 404) describe the client's
+  request and are returned unchanged without a cooldown. A client disconnect
+  never cools down a provider.
+- Cooldown is per deployment (provider + model): a failure for one model does
+  not block the same provider for another model.
+- If every deployment of a model fails or is cooling down, the client gets
+  503 `no_available_provider` with `Retry-After`.
+- Responses carry `X-Gateway-Active-Endpoint` (provider id),
+  `X-Gateway-Upstream-Model` (model name sent upstream) and
+  `X-Gateway-Attempt` (upstream fetch calls). The body's `model` field is what
+  the upstream reports it served.
+
+## Always the newest DeepSeek
+
+Deployments never name a dated snapshot. OpenCode Go and Command Code only
+list undated names; OpenRouter's `~deepseek/deepseek-flash-latest` and
+`~deepseek/deepseek-pro-latest` follow DeepSeek's newest release.
+`bun test` rejects a pinned snapshot in `config.example.yaml`, and
+
+```bash
+bun run check-latest ~/.config/deepseek-gateway/config.yaml
+```
+
+checks a live config: every undated deployment must be the highest version in
+its provider's `/models` list, and each OpenRouter alias must serve the newest
+snapshot OpenRouter lists. It exits non-zero on any mismatch, so a new DeepSeek
+release that a provider has not picked up yet is reported.
 
 ## OpenCode session headers
 
 For POST requests to `opencode.ai`, the gateway preserves the caller's
 `x-opencode-session`. When absent, it uses the first nonempty header from
-`x-deepseek-harness-session-id`, `x-session-id`, `x-session-affinity`, and
-`session_id`. Endpoint-level static headers cannot override this identity.
+`x-deepseek-harness-session-id`, `x-session-id`, `x-session-affinity`,
+`x-conversation-id`, `session_id` and `conversation_id`. Provider-level static
+headers cannot override this identity.
 
 Clients without an ID receive a SHA-256 affinity key derived from the opening
 user message and client identity (incoming Authorization, DSH user ID, and body
@@ -25,96 +88,11 @@ it. Send an explicit session header for exact conversation isolation. Requests
 with neither an ID nor an opening receive HTTP 400 `missing_session_id` without
 calling OpenCode. Other providers keep their existing header behavior.
 
-## ⚡ Core Mechanism: Hierarchical Priority Latch
-
-The gateway uses an outer priority chain and an independent RS-Latch inside each priority group:
-
-```text
-Priority 1: OpenCode Go latch
-  Account 1 → Account 2 → Account 3
-
-Priority 2: Command Code latch
-  Command Code (last fallback)
-```
-
-1. Requests stay on the active OpenCode account while it succeeds.
-2. A quota response advances within the Priority 1 OpenCode latch.
-3. Only after all three OpenCode accounts are exhausted does the request enter Priority 2.
-4. Command Code uses the same provider definition for Flash fallback and Pro routing.
-5. Exhausted endpoints enter a circuit-breaker cooldown; the next real request after expiry performs one higher-priority recovery probe.
-
-### Retry & Failover Semantics
-
-Routing configuration is loaded for both YAML and environment-only endpoint
-configuration. Empty/malformed route mappings and non-string member endpoint IDs
-are rejected at startup with `Invalid routing` errors; special model names are
-handled as literal dictionary keys.
-Group and member names are trimmed, duplicate group IDs and conflicting
-`priorityGroups`/`priority_groups` fields are rejected, and an explicitly set
-`GATEWAY_ROUTING` must point to an existing file.
-
-- `max_retries_per_request` is a floor, not a ceiling, on priority-route attempts: a request always walks every remaining route member in priority order. Circuit cooldown only skips a source when a later unblocked source exists. Each endpoint attempt includes one same-endpoint retry for transient network failures.
-- A definitive quota response advances the current group; two network failures skip that endpoint for the current request without counting as a 429.
-- OpenCode's HTTP 403 requiring an active Go subscription also advances to the next configured account and uses the quota cooldown. Other permission errors remain unchanged.
-- An upstream HTTP 401 that the quota classifier does not recognize (for example `api_key_expired`) is treated as an endpoint failure, not a quota verdict; a 401 carrying any quota marker (such as `CreditsError`, `rate_limit_exceeded` or `usage limit reached`) still takes the quota path. For the auth-failure case, that endpoint is skipped and the request moves to the next member. If every attempted endpoint fails this way, the client gets a 502 with code `upstream_auth_failed` instead of the raw 401. If the other failures were network errors, Cloudflare blocks, or failed recovery probes, the result is still `upstream_unreachable`; an ordinary 4xx/5xx from the next endpoint is returned to the client as before. On priority routes the skipped endpoint uses the network-failure circuit cooldown (30 s, doubling up to 15 min); flat RS-Latch routes only rotate the active endpoint, so a later request can reach the rejected key again. Logged error bodies have the endpoint's configured key and other credential-shaped values redacted. A dedicated-model endpoint has no peer to fail over to; its 401 is logged and the client gets `upstream_auth_failed` rather than the raw upstream body.
-- Quota cooldown starts at 1.5 hours and doubles to 3, 6, 12, then at most 24 hours; a shorter upstream `Retry-After` can accelerate recovery but never extend that schedule.
-- While a recovery probe is in flight, concurrent requests continue on the fallback. A successful probe immediately restores the higher-priority route.
-- `X-Gateway-Attempt` reports cumulative upstream fetch calls, including same-endpoint retries.
-- `/status` reports each endpoint's `circuitState`, `consecutiveFailures`, and `blockedUntil`.
-
----
-
-## 🧭 Routing Is Separate From Providers
-
-`config.yaml` contains provider/runtime settings only: URLs, environment-variable
-references, compatibility bridges, and the model allowlist. `routing.yaml`
-contains model priority, group mode, endpoint order, and route-specific upstream
-model names.
-
-```yaml
-routes:
-  deepseek-flash:
-    mode: "priority-latch"
-    priority_groups:
-      - id: "opencode-go"
-        priority: 1
-        mode: "latch"
-        members:
-          - endpoint: "opencode-go-1"
-          - endpoint: "opencode-go-2"
-          - endpoint: "opencode-go-3"
-      - id: "command-code-fallback"
-        priority: 2
-        mode: "latch"
-        members:
-          - endpoint: "command-code"
-            upstream_model: "deepseek/deepseek-v4.1-flash"
-      - id: "openrouter-fallback"
-        priority: 3
-        mode: "latch"
-        members:
-          - endpoint: "openrouter"
-            upstream_model: "deepseek/deepseek-v4.1-flash-1017"
-```
-
-Priority is only attempt order. A request walks every remaining member before
-returning 429. `deepseek-flash` uses OpenRouter last with the dated
-`deepseek/deepseek-v4.1-flash-1017` snapshot; OpenRouter's undated
-`deepseek/deepseek-v4.1-flash` is the 0910 release. `deepseek-v4.1-flash-1017`
-routes only to that OpenRouter snapshot, because Command Code cannot pin a
-snapshot, so a client that needs 1017 never gets another model. The legacy
-`deepseek-v4-flash` alias is not served. The shared OpenRouter endpoint caps
-`max_price` at $0.15 / $0.60, which the 1017 providers meet.
-The same `command-code` provider can be referenced by the Pro route with a
-different `upstream_model`; it is not duplicated in the provider list.
-
----
-
 ## 🎯 DeepSeek Official Contract First (統一正規化)
 
 **Clients always speak the DeepSeek official API contract; the gateway bridges
-endpoint differences automatically.** No client needs per-endpoint workarounds
-(e.g. disabling JSON mode in a harness), because every endpoint's declared
+provider differences automatically.** No client needs per-endpoint workarounds
+(e.g. disabling JSON mode in a harness), because every provider's declared
 `compat` deviations are normalized at the proxy layer:
 
 | Normalization | What happens | When |
@@ -124,26 +102,26 @@ endpoint differences automatically.** No client needs per-endpoint workarounds
 | `unwrap_error` | double-wrapped `{"error":{"message":"<JSON>"}}` error bodies unwrapped to the official single-layer shape | upstream wraps errors twice (Command Code) |
 | `json_schema` rejection | `response_format.type != "json_object"` → official-style 400 `invalid_request_error` at the router, no upstream call | always (official chat completions only support `json_object`) |
 
-An endpoint without `compat` is a **full passthrough** — e.g. DeepSeek official:
+A provider without `compat` is a **full passthrough** — e.g. DeepSeek official:
 
 ```yaml
-endpoints:
-  - id: "command-code"
+providers:
+  command-code:
     base_url: "https://api.commandcode.ai/provider/v1"
     compat:
       strip_response_format: true
       response_reasoning_field: "reasoning"
       unwrap_error: true
 
-  - id: "deepseek-official"
+  deepseek-official:
     base_url: "https://api.deepseek.com/v1"
     # no compat: complete official passthrough
 ```
 
-SSE streams are rewritten line-by-line through a `TransformStream` only when an
-endpoint declares `response_reasoning_field`; `data: [DONE]` and the event
+SSE streams are rewritten line-by-line through a `TransformStream` only when a
+provider declares `response_reasoning_field`; `data: [DONE]` and the event
 framing are untouched, and any line that fails to parse is forwarded verbatim
-so a conversion error can never break a stream. Endpoints without compat keep
+so a conversion error can never break a stream. Providers without compat keep
 zero-copy streaming.
 
 ---
@@ -154,10 +132,9 @@ zero-copy streaming.
 - [Bun](https://bun.sh) (v1.2+)
 
 ### 2. Setup Configuration
-Copy both configuration templates:
+Copy the configuration template:
 ```bash
 cp config.example.yaml config.yaml
-cp routing.example.yaml routing.yaml
 ```
 
 Set your keys in your shell or `~/.secrets`:
@@ -229,8 +206,8 @@ llm:
 ## 🛠️ Management & Monitoring Endpoints
 
 * **Healthcheck**: `GET http://127.0.0.1:35001/healthz`
-* **Realtime Metrics, Active Group & Key**: `GET http://127.0.0.1:35001/status`
-* **Manual Latch Toggle**: `POST http://127.0.0.1:35001/switch` or `POST http://127.0.0.1:35001/switch?index=1`
+* **Per-deployment requests, failures and cooldowns**: `GET http://127.0.0.1:35001/status`
+* **Model list**: `GET http://127.0.0.1:35001/v1/models`
 
 ---
 
@@ -285,6 +262,7 @@ llm:
 bun test
 bun run typecheck
 bun run build
+bun run check-latest config.yaml   # live: needs the provider keys
 ```
 
 ---
