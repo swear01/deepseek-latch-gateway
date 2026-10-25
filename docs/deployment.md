@@ -101,8 +101,11 @@ endpoint、port、key），先備份 `.bak-<ts>`，port 無 established 連線�
   Linux ARM64 `81e6274b9b80…`、Mac `9e24fc4d82b4…`）、新程序的 `[Routing]` 行含
   `deepseek-v4.1-flash-1017: 1:openrouter-1017`；`deepseek-v4.1-flash-1017` 實測 HTTP 200、
   回應 `model` 為 `deepseek/deepseek-v4.1-flash-1017`（`openrouter`）；`deepseek-v4-flash`
-  回 400 `model_not_allowed`；`deepseek-flash` 200（當時由 `command-code` 回答，
-  未實際走到 OpenRouter fallback）。
+  回 400 `model_not_allowed`；`deepseek-flash` 200（當時由 `command-code` 回答）。
+- `deepseek-flash` 的 OpenRouter fallback 另以 mazu 部署中的 binary 與 live 設定起隔離實例
+  （port 35998，OpenCode／Command Code 的 `base_url` 指向不可連線位址）驗證：3/3 請求
+  HTTP 200，回應 `model` 為 `deepseek/deepseek-v4.1-flash-1017`。其餘主機 routing 相同、
+  binary 同版，未逐台重做。
 - 各機 live client 設定（Pi、dsh、opencode、Codex、Swear Review）都已用 `deepseek-flash`，
   無需遷移；Pi `models-store.json` 內的 `deepseek-v4-flash` 是 opencode 上游目錄，不是本 Gateway。
 - 未部署：Athena（送修，依 fleet 政策排除）、swop（不在 HAPI 機器列表，外部 SSH timeout）。
