@@ -3,6 +3,8 @@ import type { Deployment, GatewayConfig } from "./types";
 
 /** A failed deployment is not contacted again for this long, whatever the failure was. */
 export const COOLDOWN_MS = 30 * 60 * 1000;
+/** Distinct aliased names logged once each; later ones are not logged. */
+const MAX_LOGGED_ALIASES = 500;
 
 interface DeploymentState {
   requests: number;
@@ -37,7 +39,7 @@ export class Router {
     if (Object.hasOwn(this.config.models, model)) return model;
     const alias = unversionedModelId(model);
     if (!alias || !Object.hasOwn(this.config.models, alias)) return undefined;
-    if (!this.loggedAliases.has(model) && this.loggedAliases.size < 500) {
+    if (!this.loggedAliases.has(model) && this.loggedAliases.size < MAX_LOGGED_ALIASES) {
       this.loggedAliases.add(model);
       console.log(`[Alias] ${JSON.stringify(model)} -> ${alias}`);
     }
