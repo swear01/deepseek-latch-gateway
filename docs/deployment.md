@@ -99,6 +99,22 @@ DPAPI credentials。不要切換成登入使用者的臨時程序。
 port。舊 `routing.yaml` 改名備份即可，新版不讀。binary 與 config 必須一起換：
 舊 binary 讀不了新格式，新 binary 讀不了舊格式。
 
+2026-10-25（台灣時間）部署 PR #26（merge `1c5f811`）：帶前綴、版本或日期的 DeepSeek id
+（如 `deepseek-v4-flash`、`deepseek-v4.1-flash-1017`、`deepseek/deepseek-v4-pro`、`~deepseek/deepseek-flash-latest`）
+alias 到無前後綴的 `deepseek-flash`／`deepseek-pro`；`-fast`、`-vision-exp` 與無關名稱仍回 400 `model_not_allowed`。
+
+- 完成並驗證 7 個 Gateway：mazu、zeus（swear01，35001）、cthulhu、valkyrie（NFS 共用 binary，
+  只換一次、逐台重啟；config 不變）、Zeus（swear02，35002）、Oracle（只換 binary）、Mac（同時從舊格式遷移
+  binary 與 config，`routing.yaml` 改名 `routing.yaml.retired-20261025`，回復點 `*.bak-20261025-gw2`）。
+  其餘主機回復點為 `deepseek-gateway.bak-20261025-gw3`。
+- 每台：新 PID、執行中 binary SHA-256 與建置結果相符（Linux x64 `76c6955aea2a…`，Zeus 自建相同；
+  Linux ARM64 `6aee39870956…`；Mac 簽章後 `41bb28c2fa8d…`）；52 tests 通過；`verify.sh` 9/9 PASS：
+  `/v1/models` 只有 `deepseek-flash`、`deepseek-pro`，這兩者與 `deepseek-v4-flash`、`deepseek-v4.1-flash-1017`、
+  `deepseek-v4-pro` 皆 HTTP 200 且上游為對應 family（當時由 `command-code` 回答），
+  `deepseek-v4-flash-vision-exp`、`gpt-5` 回 400。Mac `check-latest` 7/7 ok。
+- `verify.sh` 拒絕檢查原本以 `'$$'` 拼接 python 引號，macOS bash 3.2 不展開，已改為以參數傳檔名。
+- 未部署：swop（不在 HAPI 機器列表；Mac 經 `Host swop` 118.150.242.12:22 SSH timeout）、Athena（送修排除）。
+
 2026-10-25（台灣時間）部署 PR #24（merge `3042db6`）簡化 router：binary 與 config 同時更換，
 各機 config 以本機一次性部署工具 `convert.ts`（不在 repo；逐一照上方遷移規則轉換）轉成 `providers` + `models` 格式（保留各機 server、endpoint 欄位與
 `${VAR}` key 參照），`routing.yaml` 改名為 `routing.yaml.retired-20261025`，回復點為
@@ -114,8 +130,8 @@ port。舊 `routing.yaml` 改名備份即可，新版不讀。binary 與 config 
 - 部署前以候選 binary 在 port 35994 實測；另以隔離實例把 OpenCode／Command Code 指向不可連線位址，
   `deepseek-flash` 改由 OpenRouter latest 回答。
 - 當時 OpenCode Go 帳號 1 週額度用盡、帳號 2／3 key 過期（401），三者每次失敗後各 cooldown 30 分鐘。
-- 未部署：Mac（不在 HAPI 機器列表，離線）、swop（離線）、Athena（送修排除）。這些機器仍跑舊 binary＋舊設定，
-  兩者相容可繼續運作，但仍接受已移除的 id；恢復後須照上方遷移步驟同時更換 binary 與 config。
+- 未部署：Mac（不在 HAPI 機器列表，離線；已於 PR #26 部署時遷移）、swop（離線）、Athena（送修排除）。
+  未遷移的機器仍跑舊 binary＋舊設定，恢復後須照上方遷移步驟同時更換 binary 與 config。
 
 2026-10-25（台灣時間）部署 PR #21（merge `8a9e06f`）的設定變更，binary 不變：
 `deepseek-flash` 的 OpenRouter fallback 改為 `deepseek/deepseek-v4.1-flash-1017`，
