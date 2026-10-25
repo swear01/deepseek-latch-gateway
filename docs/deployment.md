@@ -88,6 +88,25 @@ DPAPI credentials。不要切換成登入使用者的臨時程序。
 
 ## 驗證邊界與最新部署紀錄
 
+2026-10-25（台灣時間）部署 PR #21（merge `8a9e06f`）的設定變更，binary 不變：
+`deepseek-flash` 的 OpenRouter fallback 改為 `deepseek/deepseek-v4.1-flash-1017`，
+新增只走 OpenRouter 1017 的 `deepseek-v4.1-flash-1017`，移除 `deepseek-v4-flash`
+route 與 allow 項目。各機以語意編輯 live `config.yaml`／`routing.yaml`（保留各自的
+endpoint、port、key），先備份 `.bak-<ts>`，port 無 established 連線後只重啟 Gateway。
+
+- 完成並驗證 7 個 Gateway：mazu、cthulhu、valkyrie、zeus（swear01，35001）、
+  Zeus（swear02，35002）、Oracle、Mac。mazu／cthulhu／valkyrie／zeus(swear01)
+  讀同一份 NFS 設定檔，只改一次，各自重啟。
+- 每台：新 PID、磁碟與執行中 binary SHA-256 相符（Linux x64 `452093eaa9a0…`、
+  Linux ARM64 `81e6274b9b80…`、Mac `9e24fc4d82b4…`）、新程序的 `[Routing]` 行含
+  `deepseek-v4.1-flash-1017: 1:openrouter-1017`；`deepseek-v4.1-flash-1017` 實測 HTTP 200、
+  回應 `model` 為 `deepseek/deepseek-v4.1-flash-1017`（`openrouter`）；`deepseek-v4-flash`
+  回 400 `model_not_allowed`；`deepseek-flash` 200（當時由 `command-code` 回答，
+  未實際走到 OpenRouter fallback）。
+- 各機 live client 設定（Pi、dsh、opencode、Codex、Swear Review）都已用 `deepseek-flash`，
+  無需遷移；Pi `models-store.json` 內的 `deepseek-v4-flash` 是 opencode 上游目錄，不是本 Gateway。
+- 未部署：Athena（送修，依 fleet 政策排除）、swop（不在 HAPI 機器列表，外部 SSH timeout）。
+
 2026-10-12（台灣時間）在 Oracle 部署 subscription-403 修復程式
 `1a07a91`：OpenCode Go 帳號 1 回 monthly quota 429、帳號 2 回訂閱失效
 403 時，Gateway 繼續嘗試帳號 3。候選 port 35011 與正式 port 35001 均
