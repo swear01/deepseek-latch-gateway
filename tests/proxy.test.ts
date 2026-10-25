@@ -126,6 +126,25 @@ describe("ordered failover", () => {
     await expect(send(router, cfg, chat, {}, { signal: controller.signal })).rejects.toThrow();
     expect(router.available("deepseek-flash")).toHaveLength(2);
   });
+
+  it("fails over when an upstream error body cannot be read", async () => {
+    const cfg = config([provider("a"), provider("b")]);
+    const router = new Router(cfg);
+    const broken = () => new Response(new ReadableStream({ pull(c) { c.error(new Error("reset mid-body")); } }), { status: 502 });
+    mockUpstreams({ a: [broken], b: [ok()] });
+    expect((await send(router, cfg, chat)).headers.get("X-Gateway-Active-Endpoint")).toBe("b");
+    expect(router.available("deepseek-flash").map((d) => d.provider)).toEqual(["b"]);
+  });
+
+  it("skips OpenCode deployments without a session id instead of rejecting the request", async () => {
+    const cfg = config([provider("go", { baseUrl: "https://opencode.ai/zen/go/v1" }), provider("cc")]);
+    const router = new Router(cfg);
+    const calls = mockUpstreams({ opencode: [ok()], cc: [ok()] });
+    const res = await send(router, cfg, { model: "deepseek-flash" });
+    expect(res.headers.get("X-Gateway-Active-Endpoint")).toBe("cc");
+    expect(calls.map((c) => new URL(c.url).hostname)).toEqual(["cc.test"]);
+    expect(router.available("deepseek-flash")).toHaveLength(2);
+  });
 });
 
 describe("request validation", () => {

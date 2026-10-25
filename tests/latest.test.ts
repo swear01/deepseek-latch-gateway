@@ -68,13 +68,24 @@ describe("checkLatest", () => {
 
   it("passes when every deployment serves the newest model", async () => {
     upstreams("deepseek/deepseek-v4.1-flash-1017");
-    expect(await checkLatest(cfg)).toEqual([]);
+    expect(await checkLatest(cfg)).toEqual({
+      ok: [
+        "deepseek-flash: cc: deepseek/deepseek-v4.1-flash is the newest listed",
+        "deepseek-flash: openrouter: ~deepseek/deepseek-flash-latest serves deepseek/deepseek-v4.1-flash-1017",
+      ],
+      problems: [],
+    });
   });
 
   it("fails when the latest alias serves an older snapshot", async () => {
     upstreams("deepseek/deepseek-v4.1-flash");
-    expect(await checkLatest(cfg)).toEqual([
+    expect((await checkLatest(cfg)).problems).toEqual([
       "deepseek-flash: openrouter: '~deepseek/deepseek-flash-latest' served 'deepseek/deepseek-v4.1-flash', newest listed is 'deepseek/deepseek-v4.1-flash-1017'",
     ]);
+  });
+
+  it("reports a provider whose model list cannot be read", async () => {
+    mockUpstreams({ cc: [ok({ error: "nope" })], openrouter: [ok({ data: openRouterCatalog })] });
+    expect((await checkLatest(cfg)).problems[0]).toStartWith("deepseek-flash: cc: cannot list models (cc: HTTP 200");
   });
 });

@@ -84,9 +84,11 @@ provider failover. Only the hash is sent; this feature does not store prompts.
 
 This fallback is a heuristic: identical openings for the same client share an
 affinity key, and truncating or replacing the opening during compaction changes
-it. Send an explicit session header for exact conversation isolation. Requests
-with neither an ID nor an opening receive HTTP 400 `missing_session_id` without
-calling OpenCode. Other providers keep their existing header behavior.
+it. Send an explicit session header for exact conversation isolation. A request
+with neither an ID nor an opening skips the OpenCode deployments (without a
+cooldown) and goes to the model's other deployments; if only OpenCode is
+configured it receives HTTP 400 `missing_session_id`. Other providers keep their
+existing header behavior.
 
 ## 🎯 DeepSeek Official Contract First (統一正規化)
 

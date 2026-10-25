@@ -43,12 +43,13 @@ export class Router {
     });
   }
 
-  /** Earliest moment any deployment of `model` leaves cooldown. */
-  nextAvailableAt(model: string): number | undefined {
+  /** Milliseconds until the first deployment of `model` leaves cooldown, if any is cooling down. */
+  remainingCooldownMs(model: string): number | undefined {
+    const time = this.now();
     const times = this.config.models[model]
       .map((deployment) => this.state(deployment).cooldownUntil)
-      .filter((until): until is number => until !== undefined);
-    return times.length > 0 ? Math.min(...times) : undefined;
+      .filter((until): until is number => until !== undefined && until > time);
+    return times.length > 0 ? Math.min(...times) - time : undefined;
   }
 
   recordRequest(deployment: Deployment): void {
@@ -58,6 +59,7 @@ export class Router {
   recordSuccess(deployment: Deployment): void {
     const state = this.state(deployment);
     state.successes++;
+    state.cooldownUntil = undefined;
     state.lastSuccessTime = new Date(this.now()).toISOString();
   }
 
@@ -68,7 +70,7 @@ export class Router {
     state.cooldownUntil = time + COOLDOWN_MS;
     state.lastError = reason.slice(0, 200);
     state.lastErrorTime = new Date(time).toISOString();
-    console.warn(`[Cooldown] ${keyOf(deployment)} paused for 30 minutes: ${state.lastError}`);
+    console.warn(`[Cooldown] ${keyOf(deployment)} paused for ${COOLDOWN_MS / 60_000} minutes: ${state.lastError}`);
   }
 
   getStatus() {

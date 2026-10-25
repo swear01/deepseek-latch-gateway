@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { Router } from "./router";
+import { COOLDOWN_MS, type Router } from "./router";
 import type { Deployment, GatewayConfig, ProviderConfig } from "./types";
 
 interface ProxyRequestContext {
@@ -379,9 +379,11 @@ function responseFormatError(body: Record<string, unknown>): Response | undefine
   }, { status: 400 });
 }
 
+const COOLDOWN_MINUTES = COOLDOWN_MS / 60_000;
+
 function retryAfterSeconds(router: Router, model: string): Record<string, string> {
-  const at = router.nextAvailableAt(model);
-  return at === undefined ? {} : { "Retry-After": String(Math.max(1, Math.ceil((at - Date.now()) / 1000))) };
+  const remaining = router.remainingCooldownMs(model);
+  return remaining === undefined ? {} : { "Retry-After": String(Math.max(1, Math.ceil(remaining / 1000))) };
 }
 
 export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Response> {
@@ -417,21 +419,20 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
   const deployments = router.available(model);
   if (deployments.length === 0) {
     return errorResponse(503, "gateway_error", "no_available_provider",
-      `Every provider for ${model} failed within the last 30 minutes and is cooling down.`, retryAfterSeconds(router, model));
+      `Every provider for ${model} failed within the last ${COOLDOWN_MINUTES} minutes and is cooling down.`, retryAfterSeconds(router, model));
   }
 
   let upstreamCalls = 0;
+  let attempted = false;
   for (const deployment of deployments) {
     const provider = config.providers[deployment.provider];
     const targetUrl = buildTargetUrl(provider.baseUrl, pathWithQuery);
     let sessionId: string | undefined;
     if (isOpenCode(targetUrl)) {
       sessionId = openCodeSessionId(req, json);
-      if (!sessionId) {
-        return errorResponse(400, "invalid_request_error", "missing_session_id",
-          "Send x-opencode-session with a stable conversation ID when no opening user message is available.");
-      }
+      if (!sessionId) continue;
     }
+    attempted = true;
     const init = {
       method: "POST",
       headers: buildUpstreamHeaders(req, provider, sessionId),
@@ -453,7 +454,12 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
         continue;
       }
       if (!upstreamRes.ok) {
-        const errBody = await upstreamRes.clone().text();
+        let errBody = "";
+        try {
+          errBody = await upstreamRes.clone().text();
+        } catch {
+          // Unreadable error body: classify by status alone.
+        }
         if (isProviderFailure(upstreamRes.status, errBody)) {
           void upstreamRes.body?.cancel().catch(() => {});
           failure = `Status ${upstreamRes.status}: ${redactCredentials(errBody, provider).slice(0, 150)}`;
@@ -467,7 +473,11 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
     router.recordFailure(deployment, failure);
   }
 
+  if (!attempted) {
+    return errorResponse(400, "invalid_request_error", "missing_session_id",
+      "Send x-opencode-session with a stable conversation ID when no opening user message is available.");
+  }
   return errorResponse(503, "gateway_error", "no_available_provider",
-    `Every available provider for ${model} failed; each is paused for 30 minutes.`,
+    `Every available provider for ${model} failed; each is paused for ${COOLDOWN_MINUTES} minutes.`,
     { ...retryAfterSeconds(router, model), "X-Gateway-Attempt": String(upstreamCalls) });
 }

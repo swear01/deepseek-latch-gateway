@@ -76,53 +76,76 @@ export function staleDeploymentProblem(deployment: Deployment, catalog: CatalogM
   return undefined;
 }
 
-async function fetchCatalog(providers: ProviderConfig[]): Promise<CatalogModel[]> {
+function endpointUrl(provider: ProviderConfig, path: string): string {
+  return `${provider.baseUrl.replace(/\/+$/, "")}${path}`;
+}
+
+async function fetchCatalog(providers: ProviderConfig[], timeoutMs: number): Promise<CatalogModel[]> {
   const errors: string[] = [];
   for (const provider of providers) {
-    const res = await fetch(`${provider.baseUrl.replace(/\/+$/, "")}/models`, {
+    const res = await fetch(endpointUrl(provider, "/models"), {
       headers: { Authorization: `Bearer ${provider.apiKey}`, ...provider.extraHeaders },
+      signal: AbortSignal.timeout(timeoutMs),
     });
-    if (res.ok) {
-      const body = (await res.json()) as { data?: CatalogModel[] };
-      return body.data ?? [];
+    const raw = await res.text();
+    let data: unknown;
+    try {
+      data = (JSON.parse(raw) as { data?: unknown }).data;
+    } catch {
+      data = undefined;
     }
-    errors.push(`${provider.id}: HTTP ${res.status}`);
+    if (res.ok && Array.isArray(data)) return data as CatalogModel[];
+    errors.push(`${provider.id}: HTTP ${res.status} ${raw.slice(0, 80)}`);
   }
   throw new Error(`cannot list models (${errors.join(", ")})`);
 }
 
-async function servedModel(provider: ProviderConfig, model: string): Promise<string> {
-  const res = await fetch(`${provider.baseUrl.replace(/\/+$/, "")}/chat/completions`, {
+async function servedModel(provider: ProviderConfig, model: string, timeoutMs: number): Promise<string> {
+  const res = await fetch(endpointUrl(provider, "/chat/completions"), {
     method: "POST",
     headers: { Authorization: `Bearer ${provider.apiKey}`, "Content-Type": "application/json", ...provider.extraHeaders },
     body: JSON.stringify({ ...provider.extraBody, model, max_tokens: 1, messages: [{ role: "user", content: "OK" }] }),
+    signal: AbortSignal.timeout(timeoutMs),
   });
-  const body = (await res.json()) as { model?: string };
-  if (!res.ok || typeof body.model !== "string") {
-    throw new Error(`HTTP ${res.status} ${JSON.stringify(body).slice(0, 200)}`);
+  const raw = await res.text();
+  if (!res.ok) throw new Error(`HTTP ${res.status} ${raw.slice(0, 200)}`);
+  let served: unknown;
+  try {
+    served = (JSON.parse(raw) as { model?: unknown }).model;
+  } catch {
+    served = undefined;
   }
-  return body.model;
+  if (typeof served !== "string") throw new Error(`response has no 'model' field: ${raw.slice(0, 200)}`);
+  return served;
 }
 
-/** Check every deployment against its provider's live catalog; returns one line per problem. */
-export async function checkLatest(config: GatewayConfig): Promise<string[]> {
-  const problems: string[] = [];
+export interface LatestReport {
+  ok: string[];
+  problems: string[];
+}
+
+/** Check every deployment against its provider's live catalog. */
+export async function checkLatest(config: GatewayConfig): Promise<LatestReport> {
+  const report: LatestReport = { ok: [], problems: [] };
+  const timeoutMs = config.server.timeoutSeconds * 1000;
   const catalogs = new Map<string, Promise<CatalogModel[]>>();
   const providersByUrl = new Map<string, ProviderConfig[]>();
   for (const provider of Object.values(config.providers)) {
-    providersByUrl.set(provider.baseUrl, [...(providersByUrl.get(provider.baseUrl) ?? []), provider]);
+    const key = endpointUrl(provider, "");
+    providersByUrl.set(key, [...(providersByUrl.get(key) ?? []), provider]);
   }
   const catalogFor = (provider: ProviderConfig) => {
-    if (!catalogs.has(provider.baseUrl)) catalogs.set(provider.baseUrl, fetchCatalog(providersByUrl.get(provider.baseUrl)!));
-    return catalogs.get(provider.baseUrl)!;
+    const key = endpointUrl(provider, "");
+    if (!catalogs.has(key)) catalogs.set(key, fetchCatalog(providersByUrl.get(key)!, timeoutMs));
+    return catalogs.get(key)!;
   };
 
   for (const [name, deployments] of Object.entries(config.models)) {
     for (const deployment of deployments) {
-      const label = `${name} -> ${deployment.provider}`;
+      const label = `${name}: ${deployment.provider}`;
       const pinned = pinnedDeploymentProblem(deployment);
       if (pinned) {
-        problems.push(`${name}: ${pinned}`);
+        report.problems.push(`${name}: ${pinned}`);
         continue;
       }
       const provider = config.providers[deployment.provider];
@@ -131,21 +154,25 @@ export async function checkLatest(config: GatewayConfig): Promise<string[]> {
         const family = latestAliasFamily(deployment.model);
         if (family) {
           const newest = newestInCatalog(catalog, family);
-          const served = await servedModel(provider, deployment.model);
-          if (!newest || served !== newest.id) {
-            problems.push(`${name}: ${deployment.provider}: '${deployment.model}' served '${served}', newest listed is '${newest?.id}'`);
+          if (!newest) {
+            report.problems.push(`${label}: model list has no ${family} snapshot to compare '${deployment.model}' against`);
+            continue;
+          }
+          const served = await servedModel(provider, deployment.model, timeoutMs);
+          if (served !== newest.id) {
+            report.problems.push(`${label}: '${deployment.model}' served '${served}', newest listed is '${newest.id}'`);
           } else {
-            console.log(`ok  ${label}: ${deployment.model} serves ${served}`);
+            report.ok.push(`${label}: ${deployment.model} serves ${served}`);
           }
           continue;
         }
         const stale = staleDeploymentProblem(deployment, catalog);
-        if (stale) problems.push(`${name}: ${stale}`);
-        else console.log(`ok  ${label}: ${deployment.model} is the newest listed`);
+        if (stale) report.problems.push(`${name}: ${stale}`);
+        else report.ok.push(`${label}: ${deployment.model} is the newest listed`);
       } catch (err) {
-        problems.push(`${name}: ${deployment.provider}: ${(err as Error).message}`);
+        report.problems.push(`${label}: ${(err as Error).message}`);
       }
     }
   }
-  return problems;
+  return report;
 }

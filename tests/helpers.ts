@@ -1,4 +1,4 @@
-import { mock, spyOn } from "bun:test";
+import { spyOn } from "bun:test";
 import { handleProxyRequest } from "../src/proxy";
 import { Router } from "../src/router";
 import type { GatewayConfig, ProviderConfig } from "../src/types";
@@ -11,17 +11,24 @@ export interface Call {
 
 export type Reply = Response | Error | ((call: Call) => Response | Error);
 
-/** Replace global fetch: `replies[providerId]` is consumed in order; the last entry repeats. */
+let fetchSpy: { mockRestore(): void } | undefined;
+
+/**
+ * Replace global fetch. Replies are keyed by the first hostname label of the
+ * upstream URL (`provider()` uses `https://<id>.test/v1`); each list is
+ * consumed in order and its last entry repeats.
+ */
 export function mockUpstreams(replies: Record<string, Reply[]>): Call[] {
   const calls: Call[] = [];
   const used = new Map<string, number>();
   const fake = async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (init?.signal?.aborted) throw init.signal.reason;
     const url = String(input);
     const provider = new URL(url).hostname.split(".")[0];
     const call = { url, headers: new Headers(init?.headers), body: JSON.parse(String(init?.body ?? "{}")) };
     calls.push(call);
     const list = replies[provider];
-    if (!list) throw new Error(`unexpected upstream ${url}`);
+    if (!list || list.length === 0) throw new Error(`no reply configured for upstream ${url}`);
     const index = used.get(provider) ?? 0;
     used.set(provider, index + 1);
     let reply = list[Math.min(index, list.length - 1)];
@@ -29,12 +36,14 @@ export function mockUpstreams(replies: Record<string, Reply[]>): Call[] {
     if (reply instanceof Error) throw reply;
     return reply.clone();
   };
-  spyOn(globalThis, "fetch").mockImplementation(Object.assign(fake, { preconnect: globalThis.fetch.preconnect }));
+  fetchSpy?.mockRestore();
+  fetchSpy = spyOn(globalThis, "fetch").mockImplementation(Object.assign(fake, { preconnect: globalThis.fetch.preconnect }));
   return calls;
 }
 
 export function restoreFetch(): void {
-  mock.restore();
+  fetchSpy?.mockRestore();
+  fetchSpy = undefined;
 }
 
 export function provider(id: string, extra: Partial<ProviderConfig> = {}): ProviderConfig {
@@ -60,7 +69,7 @@ export function send(
   const req = new Request(`http://127.0.0.1:8080${init.path ?? "/v1/chat/completions"}`, {
     method,
     headers: { "Content-Type": "application/json", ...headers },
-    body: method === "GET" ? undefined : typeof body === "string" ? body : JSON.stringify(body),
+    body: method === "GET" || method === "HEAD" ? undefined : typeof body === "string" ? body : JSON.stringify(body),
     signal: init.signal,
   });
   return handleProxyRequest({ req, url: new URL(req.url), router, config: cfg });

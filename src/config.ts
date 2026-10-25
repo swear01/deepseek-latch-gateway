@@ -40,9 +40,16 @@ function resolveProvider(id: string, raw: RawProviderConfig): ProviderConfig {
   if (!raw || typeof raw !== "object" || typeof raw.base_url !== "string" || !raw.base_url) {
     throw new Error(`Invalid configuration: providers.${id}.base_url is required.`);
   }
+  if (raw.api_key !== undefined && typeof raw.api_key !== "string") {
+    throw new Error(`Invalid configuration: providers.${id}.api_key must be a string.`);
+  }
+  const baseUrl = interpolateEnv(raw.base_url);
+  if (!baseUrl) {
+    throw new Error(`Invalid configuration: providers.${id}.base_url resolved to an empty string.`);
+  }
   const provider: ProviderConfig = {
     id,
-    baseUrl: interpolateEnv(raw.base_url),
+    baseUrl,
     apiKey: interpolateEnv(raw.api_key),
   };
   if (raw.compat) {
@@ -90,8 +97,8 @@ export function parseConfig(rawContent: string): GatewayConfig {
   return {
     server: {
       host: parsed.server?.host || "127.0.0.1",
-      port: parsed.server?.port || 35001,
-      timeoutSeconds: parsed.server?.timeout_seconds || 120,
+      port: parsed.server?.port ?? 35001,
+      timeoutSeconds: parsed.server?.timeout_seconds ?? 120,
     },
     providers,
     models,
@@ -100,5 +107,11 @@ export function parseConfig(rawContent: string): GatewayConfig {
 
 export function loadConfig(configPath?: string): GatewayConfig {
   const targetPath = configPath || process.env.GATEWAY_CONFIG || "./config.yaml";
-  return parseConfig(readFileSync(targetPath, "utf-8"));
+  let rawContent: string;
+  try {
+    rawContent = readFileSync(targetPath, "utf-8");
+  } catch {
+    throw new Error(`Cannot read gateway config at '${targetPath}'. Copy config.example.yaml or pass the config path.`);
+  }
+  return parseConfig(rawContent);
 }
