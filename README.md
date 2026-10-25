@@ -28,8 +28,12 @@ models:
 ```
 
 See `config.example.yaml` for the full fleet configuration. The keys of
-`models` are the only model ids the gateway accepts; anything else gets
-400 `model_not_allowed`.
+`models` are the public model ids. Versioned, dated and prefixed DeepSeek names
+alias to them: the gateway drops provider prefixes, `~`, versions, snapshot
+dates and `-latest`, so `deepseek-v4-flash`, `deepseek-v4.1-flash-1017`,
+`deepseek/deepseek-v4.1-flash` and `opencode-go/deepseek-flash` are served as
+`deepseek-flash`, and `deepseek-v4-pro` as `deepseek-pro`. Variants such as
+`-fast` or `-vision-exp` and any other name get 400 `model_not_allowed`.
 
 ## Routing and cooldown
 

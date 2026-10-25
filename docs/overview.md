@@ -9,7 +9,8 @@ Configuration follows LiteLLM's shape in a single `config.yaml`:
 
 - `providers` holds URLs, credentials and compatibility bridges.
 - `models` maps each public model id (`deepseek-flash`, `deepseek-pro`) to an
-  ordered list of deployments (`provider` + upstream `model`).
+  ordered list of deployments (`provider` + upstream `model`). Versioned or
+  prefixed DeepSeek names such as `deepseek-v4-flash` alias to these ids.
 - A request uses the first deployment that is not cooling down. Any provider
   failure (quota, credentials, block, 408, 5xx, network) pauses that
   deployment for 30 minutes.

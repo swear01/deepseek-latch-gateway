@@ -90,8 +90,11 @@ responses still reach the client unchanged.
 `config.yaml` holds `providers` (connection and compat settings) and `models`
 (public id -> ordered deployments). A provider can appear under several models
 with different upstream model names; Command Code serves both Flash and Pro.
-The model keys double as the allowlist. The old `endpoints` list and
-`routing.yaml` are rejected at startup.
+The model keys are the allowlist; versioned, dated and prefixed DeepSeek names
+(`deepseek-v4-flash`, `deepseek-v4.1-flash-1017`, `deepseek/deepseek-v4-pro`)
+alias to the unversioned key of the same family, so clients that still send an
+old id keep working and always get the newest model. The old `endpoints` list
+and `routing.yaml` are rejected at startup.
 
 ### 12. "Newest DeepSeek" is checked, not pinned
 
