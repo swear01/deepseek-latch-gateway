@@ -37,9 +37,9 @@ export class Router {
     if (Object.hasOwn(this.config.models, model)) return model;
     const alias = unversionedModelId(model);
     if (!alias || !Object.hasOwn(this.config.models, alias)) return undefined;
-    if (!this.loggedAliases.has(model)) {
+    if (!this.loggedAliases.has(model) && this.loggedAliases.size < 500) {
       this.loggedAliases.add(model);
-      console.log(`[Alias] ${model} -> ${alias}`);
+      console.log(`[Alias] ${JSON.stringify(model)} -> ${alias}`);
     }
     return alias;
   }
