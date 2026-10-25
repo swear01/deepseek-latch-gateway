@@ -394,11 +394,12 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
     return errorResponse(400, "invalid_request_error", "missing_model", "Request body must be a JSON object with a string 'model'.");
   }
   const json = body as Record<string, unknown>;
-  const model = json.model as string;
-  if (!router.hasModel(model)) {
+  const model = router.resolveModel(json.model as string);
+  if (!model) {
     const allowed = Object.keys(config.models).join(", ");
-    console.warn(`[Model Rejected] ${model} (allowed: ${allowed})`);
-    return errorResponse(400, "invalid_request_error", "model_not_allowed", `Model not allowed: ${model}. Allowed models: ${allowed}`);
+    console.warn(`[Model Rejected] ${json.model} (allowed: ${allowed} and their versioned aliases)`);
+    return errorResponse(400, "invalid_request_error", "model_not_allowed",
+      `Model not allowed: ${json.model}. Allowed models: ${allowed} (versioned names such as deepseek-v4-flash alias to them).`);
   }
   const formatError = responseFormatError(json);
   if (formatError) return formatError;

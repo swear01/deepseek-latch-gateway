@@ -4,6 +4,7 @@ import {
   newestInCatalog,
   parseModelName,
   pinnedDeploymentProblem,
+  unversionedModelId,
   staleDeploymentProblem,
 } from "../src/latest";
 import { config, mockUpstreams, ok, provider, restoreFetch } from "./helpers";
@@ -29,6 +30,15 @@ describe("model names", () => {
     expect(parseModelName("deepseek-v4-pro")).toEqual({ family: "pro", version: [4], snapshot: undefined });
     expect(parseModelName("deepseek/deepseek-v4.1-flash-fast")).toBeUndefined();
     expect(parseModelName("deepseek/deepseek-v4.1-flash:batch")).toBeUndefined();
+  });
+
+  it("drops prefixes, versions, snapshots and -latest when aliasing", () => {
+    expect(unversionedModelId("deepseek-v4.1-flash-1017")).toBe("deepseek-flash");
+    expect(unversionedModelId("deepseek/deepseek-v4-pro-20260813")).toBe("deepseek-pro");
+    expect(unversionedModelId("~deepseek/deepseek-pro-latest")).toBe("deepseek-pro");
+    expect(unversionedModelId("opencode-go/deepseek-flash")).toBe("deepseek-flash");
+    expect(unversionedModelId("deepseek-v4-flash-vision-exp")).toBeUndefined();
+    expect(unversionedModelId("deepseek-chat")).toBeUndefined();
   });
 
   it("flags pinned snapshots but accepts undated names and latest aliases", () => {

@@ -24,6 +24,19 @@ export function latestAliasFamily(id: string): ModelName["family"] | undefined {
   return match ? (match[1] as ModelName["family"]) : undefined;
 }
 
+/**
+ * Public id an incoming DeepSeek model name aliases to: provider prefixes, `~`,
+ * versions, dated snapshots and `-latest` are dropped, so `deepseek-v4-flash`,
+ * `deepseek/deepseek-v4.1-flash-1017` and `opencode-go/deepseek-flash` all
+ * become `deepseek-flash`. Variants such as `-fast` or `-vision-exp` do not alias.
+ */
+export function unversionedModelId(id: string): string | undefined {
+  const bare = id.replace(/^~/, "").split("/").pop() ?? "";
+  if (/^deepseek-(flash|pro)$/.test(bare)) return bare;
+  const family = parseModelName(bare)?.family ?? /^deepseek-(flash|pro)-latest$/.exec(bare)?.[1];
+  return family ? `deepseek-${family}` : undefined;
+}
+
 export function compareVersions(a: number[], b: number[]): number {
   for (let i = 0; i < Math.max(a.length, b.length); i++) {
     const diff = (a[i] ?? 0) - (b[i] ?? 0);

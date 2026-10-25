@@ -148,13 +148,29 @@ describe("ordered failover", () => {
 });
 
 describe("request validation", () => {
-  it("rejects model ids that are not configured", async () => {
+  it("rejects model ids that are not configured and are not DeepSeek aliases", async () => {
     const cfg = config([provider("a")]);
     const calls = mockUpstreams({ a: [ok()] });
-    const res = await send(new Router(cfg), cfg, { ...chat, model: "deepseek-v4-flash" });
-    expect(res.status).toBe(400);
-    expect((await res.json()).error.code).toBe("model_not_allowed");
+    for (const model of ["gpt-5", "deepseek-pro", "deepseek/deepseek-v4-flash-vision-exp", "deepseek-v4.1-flash-fast"]) {
+      const res = await send(new Router(cfg), cfg, { ...chat, model });
+      expect(res.status).toBe(400);
+      expect((await res.json()).error.code).toBe("model_not_allowed");
+    }
     expect(calls).toHaveLength(0);
+  });
+
+  it("routes versioned, dated and prefixed DeepSeek names to the unversioned model", async () => {
+    const cfg = config([provider("a")], {
+      "deepseek-flash": [{ provider: "a", model: "flash" }],
+      "deepseek-pro": [{ provider: "a", model: "pro" }],
+    });
+    const calls = mockUpstreams({ a: [ok()] });
+    const names = [
+      "deepseek-v4-flash", "deepseek-v4.1-flash-1017", "deepseek/deepseek-v4.1-flash", "opencode-go/deepseek-flash",
+      "~deepseek/deepseek-flash-latest", "deepseek-v4-pro", "deepseek/deepseek-v4-pro-0813",
+    ];
+    for (const model of names) expect((await send(new Router(cfg), cfg, { ...chat, model })).status).toBe(200);
+    expect(calls.map((c) => c.body.model)).toEqual(["flash", "flash", "flash", "flash", "flash", "pro", "pro"]);
   });
 
   it("rejects bodies without a model", async () => {

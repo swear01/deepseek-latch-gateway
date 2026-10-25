@@ -1,3 +1,4 @@
+import { unversionedModelId } from "./latest";
 import type { Deployment, GatewayConfig } from "./types";
 
 /** A failed deployment is not contacted again for this long, whatever the failure was. */
@@ -30,8 +31,11 @@ export class Router {
     }
   }
 
-  hasModel(model: string): boolean {
-    return Object.hasOwn(this.config.models, model);
+  /** Configured model id for an incoming name, accepting versioned and prefixed DeepSeek aliases. */
+  resolveModel(model: string): string | undefined {
+    if (Object.hasOwn(this.config.models, model)) return model;
+    const alias = unversionedModelId(model);
+    return alias && Object.hasOwn(this.config.models, alias) ? alias : undefined;
   }
 
   /** Deployments for `model` that are not cooling down, in configured order. */
