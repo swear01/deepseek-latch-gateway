@@ -20,6 +20,7 @@ function keyOf(deployment: Deployment): string {
 
 export class Router {
   private readonly states = new Map<string, DeploymentState>();
+  private readonly loggedAliases = new Set<string>();
   private readonly startedAt: number;
 
   constructor(private readonly config: GatewayConfig, private readonly now: () => number = Date.now) {
@@ -35,7 +36,12 @@ export class Router {
   resolveModel(model: string): string | undefined {
     if (Object.hasOwn(this.config.models, model)) return model;
     const alias = unversionedModelId(model);
-    return alias && Object.hasOwn(this.config.models, alias) ? alias : undefined;
+    if (!alias || !Object.hasOwn(this.config.models, alias)) return undefined;
+    if (!this.loggedAliases.has(model)) {
+      this.loggedAliases.add(model);
+      console.log(`[Alias] ${model} -> ${alias}`);
+    }
+    return alias;
   }
 
   /** Deployments for `model` that are not cooling down, in configured order. */

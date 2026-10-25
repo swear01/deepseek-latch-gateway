@@ -399,7 +399,7 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
     const allowed = Object.keys(config.models).join(", ");
     console.warn(`[Model Rejected] ${json.model} (allowed: ${allowed} and their versioned aliases)`);
     return errorResponse(400, "invalid_request_error", "model_not_allowed",
-      `Model not allowed: ${json.model}. Allowed models: ${allowed} (versioned names such as deepseek-v4-flash alias to them).`);
+      `Model not allowed: ${json.model}. Allowed models: ${allowed} (prefixed, versioned or dated DeepSeek names alias to a configured deepseek-flash / deepseek-pro).`);
   }
   const formatError = responseFormatError(json);
   if (formatError) return formatError;

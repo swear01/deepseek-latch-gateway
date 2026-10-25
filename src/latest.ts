@@ -31,7 +31,7 @@ export function latestAliasFamily(id: string): ModelName["family"] | undefined {
  * become `deepseek-flash`. Variants such as `-fast` or `-vision-exp` do not alias.
  */
 export function unversionedModelId(id: string): string | undefined {
-  const bare = id.replace(/^~/, "").split("/").pop() ?? "";
+  const bare = id.replace(/^~/, "").replace(/^.*\//, "");
   if (/^deepseek-(flash|pro)$/.test(bare)) return bare;
   const family = parseModelName(bare)?.family ?? /^deepseek-(flash|pro)-latest$/.exec(bare)?.[1];
   return family ? `deepseek-${family}` : undefined;
