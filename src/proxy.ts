@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { redactCredentials } from "./redact";
+import { upstreamSnippet } from "./redact";
 import { COOLDOWN_MS, type Router } from "./router";
 import type { Deployment, GatewayConfig, ProviderConfig } from "./types";
 
@@ -449,7 +449,7 @@ export async function handleProxyRequest(ctx: ProxyRequestContext): Promise<Resp
         }
         if (isProviderFailure(upstreamRes.status, errBody)) {
           void upstreamRes.body?.cancel().catch(() => {});
-          failure = `Status ${upstreamRes.status}: ${redactCredentials(errBody, provider).slice(0, 150)}`;
+          failure = `Status ${upstreamRes.status}: ${upstreamSnippet(errBody, provider, 150)}`;
           break;
         }
       } else {

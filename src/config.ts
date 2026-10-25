@@ -99,8 +99,8 @@ export function parseConfig(rawContent: string): GatewayConfig {
     throw new Error(`Invalid configuration: server.port must be an integer from 1 to 65535.`);
   }
   const timeoutSeconds = parsed.server?.timeout_seconds ?? 120;
-  if (typeof timeoutSeconds !== "number" || !(timeoutSeconds > 0)) {
-    throw new Error(`Invalid configuration: server.timeout_seconds must be a positive number.`);
+  if (typeof timeoutSeconds !== "number" || !(timeoutSeconds > 0) || timeoutSeconds > 255) {
+    throw new Error(`Invalid configuration: server.timeout_seconds must be from 1 to 255 (Bun idleTimeout limit).`);
   }
 
   return {
@@ -120,7 +120,10 @@ export function loadConfig(configPath?: string): GatewayConfig {
   try {
     rawContent = readFileSync(targetPath, "utf-8");
   } catch (err) {
-    throw new Error(`Cannot read gateway config at '${targetPath}': ${(err as Error).message}`, { cause: err });
+    throw new Error(
+      `Cannot read gateway config at '${targetPath}': ${(err as Error).message}. Copy config.example.yaml or pass the config path.`,
+      { cause: err },
+    );
   }
   return parseConfig(rawContent);
 }

@@ -88,4 +88,11 @@ describe("checkLatest", () => {
     mockUpstreams({ cc: [ok({ error: "nope" })], openrouter: [ok({ data: openRouterCatalog })] });
     expect((await checkLatest(cfg)).problems[0]).toStartWith("deepseek-flash: cc: cannot list models (cc: HTTP 200");
   });
+
+  it("redacts credentials echoed in upstream error bodies", async () => {
+    mockUpstreams({ cc: [ok({ error: "bad key key-cc" })], openrouter: [ok({ data: openRouterCatalog })] });
+    const [problem] = (await checkLatest(cfg)).problems;
+    expect(problem).toContain("[redacted]");
+    expect(problem).not.toContain("key-cc");
+  });
 });

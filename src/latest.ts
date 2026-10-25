@@ -1,4 +1,4 @@
-import { redactCredentials } from "./redact";
+import { upstreamSnippet } from "./redact";
 import type { Deployment, GatewayConfig, ProviderConfig } from "./types";
 
 export interface ModelName {
@@ -96,7 +96,7 @@ async function fetchCatalog(providers: ProviderConfig[], timeoutMs: number): Pro
       data = undefined;
     }
     if (res.ok && Array.isArray(data)) return data as CatalogModel[];
-    errors.push(`${provider.id}: HTTP ${res.status} ${redactCredentials(raw, provider).slice(0, 80)}`);
+    errors.push(`${provider.id}: HTTP ${res.status} ${upstreamSnippet(raw, provider, 80)}`);
   }
   throw new Error(`cannot list models (${errors.join(", ")})`);
 }
@@ -109,14 +109,14 @@ async function servedModel(provider: ProviderConfig, model: string, timeoutMs: n
     signal: AbortSignal.timeout(timeoutMs),
   });
   const raw = await res.text();
-  if (!res.ok) throw new Error(`HTTP ${res.status} ${redactCredentials(raw, provider).slice(0, 200)}`);
+  if (!res.ok) throw new Error(`HTTP ${res.status} ${upstreamSnippet(raw, provider, 200)}`);
   let served: unknown;
   try {
     served = (JSON.parse(raw) as { model?: unknown }).model;
   } catch {
     served = undefined;
   }
-  if (typeof served !== "string") throw new Error(`response has no 'model' field: ${redactCredentials(raw, provider).slice(0, 200)}`);
+  if (typeof served !== "string") throw new Error(`response has no 'model' field: ${upstreamSnippet(raw, provider, 200)}`);
   return served;
 }
 

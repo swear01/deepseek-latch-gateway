@@ -44,6 +44,7 @@ models:
     const valid = `${providers}models: { m: [{ provider: a, model: x }] }\n`;
     expect(() => parseConfig(`server: { port: 0 }\n${valid}`)).toThrow("server.port");
     expect(() => parseConfig(`server: { timeout_seconds: 0 }\n${valid}`)).toThrow("timeout_seconds");
+    expect(() => parseConfig(`server: { timeout_seconds: 256 }\n${valid}`)).toThrow("timeout_seconds");
   });
 
   it("rejects the old endpoints/routing.yaml format", () => {

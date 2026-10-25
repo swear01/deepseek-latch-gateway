@@ -14,3 +14,8 @@ export function redactCredentials(text: string, provider: ProviderConfig): strin
     .replace(/(?<![A-Za-z0-9])(?:oc_sk|sk|rk|pk|key|token)[-_:=]\s*(?=[A-Za-z0-9_-]*\d|[A-Za-z0-9_-]{20})[A-Za-z0-9_-]+/gi, "[redacted]")
     .replace(/\bBearer\s+\S+/gi, "Bearer [redacted]");
 }
+
+/** A redacted, length-capped excerpt of an upstream body for logs and diagnostics. */
+export function upstreamSnippet(text: string, provider: ProviderConfig, maxLength: number): string {
+  return redactCredentials(text, provider).slice(0, maxLength);
+}

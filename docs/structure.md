@@ -26,6 +26,7 @@ deepseek-latch-gateway/
 │   ├── config.test.ts          # Config parsing and shipped-example rules
 │   ├── proxy.test.ts           # Failover, cooldown, validation and compat
 │   ├── latest.test.ts          # Newest-model rules and check-latest
+│   ├── redact.test.ts          # Credential redaction
 │   ├── session-header.test.ts  # OpenCode session affinity and User-Agent
 │   └── server-timeout.test.ts  # Streaming idle timeout
 ├── config.example.yaml         # Provider and model configuration template
