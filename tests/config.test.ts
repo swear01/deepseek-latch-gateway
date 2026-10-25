@@ -41,6 +41,9 @@ models:
     expect(() => parseConfig(`${providers}models: { m: [{ provider: b, model: x }] }`)).toThrow("unknown provider 'b'");
     expect(() => parseConfig(`${providers}models: { m: [{ provider: a }] }`)).toThrow("'provider' and 'model'");
     expect(() => parseConfig('providers: { a: { api_key: k } }\nmodels: { m: [{ provider: a, model: x }] }')).toThrow("base_url");
+    const valid = `${providers}models: { m: [{ provider: a, model: x }] }\n`;
+    expect(() => parseConfig(`server: { port: 0 }\n${valid}`)).toThrow("server.port");
+    expect(() => parseConfig(`server: { timeout_seconds: 0 }\n${valid}`)).toThrow("timeout_seconds");
   });
 
   it("rejects the old endpoints/routing.yaml format", () => {

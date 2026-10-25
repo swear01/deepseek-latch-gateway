@@ -18,6 +18,7 @@ deepseek-latch-gateway/
 │   ├── router.ts               # Ordered deployments and 30-minute cooldown state
 │   ├── proxy.ts                # Request validation, failover loop, compat bridges, SSE passthrough
 │   ├── latest.ts               # "Newest DeepSeek model" rules and live provider check
+│   ├── redact.ts               # Credential redaction for logged upstream text
 │   ├── check-latest.ts         # `bun run check-latest` entry point
 │   └── index.ts                # Bun HTTP server & management endpoints (/healthz, /status)
 ├── tests/                      # Test suite

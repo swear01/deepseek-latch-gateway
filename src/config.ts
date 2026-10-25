@@ -94,11 +94,20 @@ export function parseConfig(rawContent: string): GatewayConfig {
     });
   }
 
+  const port = parsed.server?.port ?? 35001;
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error(`Invalid configuration: server.port must be an integer from 1 to 65535.`);
+  }
+  const timeoutSeconds = parsed.server?.timeout_seconds ?? 120;
+  if (typeof timeoutSeconds !== "number" || !(timeoutSeconds > 0)) {
+    throw new Error(`Invalid configuration: server.timeout_seconds must be a positive number.`);
+  }
+
   return {
     server: {
       host: parsed.server?.host || "127.0.0.1",
-      port: parsed.server?.port ?? 35001,
-      timeoutSeconds: parsed.server?.timeout_seconds ?? 120,
+      port,
+      timeoutSeconds,
     },
     providers,
     models,
@@ -110,8 +119,8 @@ export function loadConfig(configPath?: string): GatewayConfig {
   let rawContent: string;
   try {
     rawContent = readFileSync(targetPath, "utf-8");
-  } catch {
-    throw new Error(`Cannot read gateway config at '${targetPath}'. Copy config.example.yaml or pass the config path.`);
+  } catch (err) {
+    throw new Error(`Cannot read gateway config at '${targetPath}': ${(err as Error).message}`, { cause: err });
   }
   return parseConfig(rawContent);
 }
