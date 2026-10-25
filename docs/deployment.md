@@ -99,6 +99,24 @@ DPAPI credentials。不要切換成登入使用者的臨時程序。
 port。舊 `routing.yaml` 改名備份即可，新版不讀。binary 與 config 必須一起換：
 舊 binary 讀不了新格式，新 binary 讀不了舊格式。
 
+2026-10-25（台灣時間）部署 PR #24（merge `3042db6`）簡化 router：binary 與 config 同時更換，
+各機 config 以 `convert.ts` 轉成 `providers` + `models` 格式（保留各機 server、endpoint 欄位與
+`${VAR}` key 參照），`routing.yaml` 改名為 `routing.yaml.retired-20261025`，回復點為
+`*.bak-20261025-gw2`。
+
+- 完成並驗證 6 個 Gateway：mazu、zeus（swear01，35001）、cthulhu、valkyrie（四台 NFS 共用檔案，
+  mazu 替換一次後逐台重啟）、Zeus（swear02，35002）、Oracle（各自從 `3042db6` 建置）。
+- 每台：新 PID、執行中 binary SHA-256 與磁碟相符（Linux x64 `9e44627e1ef8…`，Zeus 自建結果相同；
+  Linux ARM64 `9a0af84eb842…`）；`verify.sh` 全 PASS：`/v1/models` 只有 `deepseek-flash`、`deepseek-pro`，
+  兩者 HTTP 200（當時由 `command-code` 回答），`deepseek-v4-flash`、`deepseek-v4.1-flash-1017`、
+  `deepseek-v4-pro` 回 400 `model_not_allowed`；`check-latest` 對 live config 7/7 ok
+  （flash-latest → `deepseek/deepseek-v4.1-flash-1017`，pro-latest → `deepseek/deepseek-v4-pro-0813`）。
+- 部署前以候選 binary 在 port 35994 實測；另以隔離實例把 OpenCode／Command Code 指向不可連線位址，
+  `deepseek-flash` 改由 OpenRouter latest 回答。
+- 當時 OpenCode Go 帳號 1 週額度用盡、帳號 2／3 key 過期（401），三者每次失敗後各 cooldown 30 分鐘。
+- 未部署：Mac（不在 HAPI 機器列表，離線）、swop（離線）、Athena（送修排除）。這些機器仍跑舊 binary＋舊設定，
+  兩者相容可繼續運作，但仍接受已移除的 id；恢復後須照上方遷移步驟同時更換 binary 與 config。
+
 2026-10-25（台灣時間）部署 PR #21（merge `8a9e06f`）的設定變更，binary 不變：
 `deepseek-flash` 的 OpenRouter fallback 改為 `deepseek/deepseek-v4.1-flash-1017`，
 新增只走 OpenRouter 1017 的 `deepseek-v4.1-flash-1017`，移除 `deepseek-v4-flash`
