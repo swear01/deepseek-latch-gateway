@@ -1,11 +1,9 @@
 import { loadConfig } from "./config";
-import { RSLatchManager } from "./latch";
-import { PriorityLatchManager } from "./priority-latch";
 import { handleProxyRequest } from "./proxy";
+import { Router } from "./router";
 
-const configPath = process.argv[2] || process.env.GATEWAY_CONFIG;
-const config = loadConfig(configPath);
-const latch = config.routing ? new PriorityLatchManager(config) : new RSLatchManager(config);
+const config = loadConfig(process.argv[2]);
+const router = new Router(config);
 
 const server = Bun.serve({
   hostname: config.server.host,
@@ -13,75 +11,27 @@ const server = Bun.serve({
   idleTimeout: config.server.timeoutSeconds,
   async fetch(req) {
     const url = new URL(req.url);
-    const pathname = url.pathname;
-
-    // 1. Healthcheck Endpoint
-    if (pathname === "/healthz" || pathname === "/health") {
-      const activeEp = latch.getActiveEndpoint();
-      return new Response(
-        JSON.stringify({
-          status: "ok",
-          active_index: latch.getActiveIndex(),
-          active_endpoint: activeEp.id,
-          name: activeEp.name,
-        }),
-        {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        }
-      );
+    if (url.pathname === "/healthz" || url.pathname === "/health") {
+      return Response.json({ status: "ok" });
     }
-
-    // 2. Gateway Status Endpoint
-    if (pathname === "/status") {
-      return new Response(JSON.stringify(latch.getStatus(), null, 2), {
-        status: 200,
+    if (url.pathname === "/status") {
+      return new Response(JSON.stringify(router.getStatus(), null, 2), {
         headers: { "Content-Type": "application/json" },
       });
     }
-
-    // 3. Manual Switch Endpoint (POST /switch or POST /switch?index=1)
-    if (pathname === "/switch" && req.method === "POST") {
-      const queryIndex = url.searchParams.get("index");
-      let targetIndex: number | undefined;
-      if (queryIndex !== null) {
-        targetIndex = parseInt(queryIndex, 10);
-      }
-      const switchResult = latch.forceSwitch(targetIndex);
-      const activeEp = latch.getActiveEndpoint();
-      return new Response(
-        JSON.stringify({
-          message: "RS-Latch switched successfully",
-          old_index: switchResult.oldIndex,
-          new_index: switchResult.newIndex,
-          active_endpoint: activeEp.id,
-          name: activeEp.name,
-        }),
-        {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        }
-      );
-    }
-
-    // 4. All Other LLM API Requests (OpenAI/Anthropic endpoints)
-    return handleProxyRequest({ req, url, latch, config });
+    return handleProxyRequest({ req, url, router, config });
   },
 });
 
 console.log(
   `\x1b[32m🚀 DeepSeek Latch Gateway running on http://${server.hostname}:${server.port}\x1b[0m`
 );
-console.log(`[Config] Configured ${config.endpoints.length} provider endpoints`);
-config.endpoints.forEach((ep, i) => {
-  console.log(`  [${i}] ${ep.name} (${ep.id}) -> ${ep.baseUrl}`);
-});
-if (config.routing) {
-  for (const [model, route] of Object.entries(config.routing.routes)) {
-    console.log(`[Routing] ${model}: ${route.groups.map((group) => `${group.priority}:${group.id}`).join(" -> ")}`);
-  }
+for (const provider of Object.values(config.providers)) {
+  console.log(`[Provider] ${provider.id} -> ${provider.baseUrl}`);
 }
-console.log(`[Status] Active Initial Endpoint: ${latch.getActiveEndpoint().name}`);
+for (const [model, deployments] of Object.entries(config.models)) {
+  console.log(`[Model] ${model}: ${deployments.map((d) => `${d.provider}(${d.model})`).join(" -> ")}`);
+}
 
 process.on("SIGINT", () => {
   console.log("\n[Gateway] Shutting down...");

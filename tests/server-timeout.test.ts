@@ -32,14 +32,13 @@ server:
   host: "127.0.0.1"
   port: ${gatewayPort}
   timeout_seconds: 15
-strategy:
-  mode: "latch"
-  max_retries_per_request: 1
-endpoints:
-  - id: "slow"
-    name: "Slow upstream"
+providers:
+  slow:
     base_url: "http://127.0.0.1:${upstream.port}/v1"
     api_key: "test"
+models:
+  deepseek-flash:
+    - { provider: slow, model: "slow-model" }
 `);
     const gateway = Bun.spawn(["bun", "run", "src/index.ts", configPath], {
       cwd: process.cwd(),
@@ -61,7 +60,7 @@ endpoints:
       const response = await fetch(`http://127.0.0.1:${gatewayPort}/v1/chat/completions`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model: "deepseek-chat", messages: [{ role: "user", content: "test" }] }),
+        body: JSON.stringify({ model: "deepseek-flash", messages: [{ role: "user", content: "test" }] }),
       });
 
       expect(response.status).toBe(200);

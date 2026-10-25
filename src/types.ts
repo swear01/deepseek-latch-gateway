@@ -1,9 +1,9 @@
 /**
  * Declared deviations from the canonical DeepSeek official API contract.
  * The gateway exposes the official contract to every client and bridges these
- * deviations per-endpoint; an endpoint without `compat` is a full passthrough.
+ * deviations per-provider; a provider without `compat` is a full passthrough.
  */
-export interface EndpointCompat {
+export interface ProviderCompat {
   /** Upstream rejects `response_format` -> drop it before forwarding */
   stripResponseFormat?: boolean;
   /** Non-official reasoning field name in upstream responses (official: `reasoning_content`); renamed in both non-streaming messages and SSE deltas */
@@ -12,41 +12,19 @@ export interface EndpointCompat {
   unwrapError?: boolean;
 }
 
-export interface EndpointConfig {
+export interface ProviderConfig {
   id: string;
-  name: string;
   baseUrl: string;
   apiKey: string;
-  /** Incoming model ids routed exclusively to this endpoint (bypasses the RS-Latch pool) */
-  models?: string[];
-  /** Per-endpoint rewrite of the outgoing model name: incoming -> upstream */
-  modelMap?: Record<string, string>;
-  /** Declared deviations from the canonical DeepSeek API contract (default: full passthrough) */
-  compat?: EndpointCompat;
-  weight?: number;
+  compat?: ProviderCompat;
   extraHeaders?: Record<string, string>;
   extraBody?: Record<string, unknown>;
 }
 
-export interface RouteMemberConfig {
-  endpointId: string;
-  upstreamModel?: string;
-}
-
-export interface RouteGroupConfig {
-  id: string;
-  priority: number;
-  mode: "latch";
-  members: RouteMemberConfig[];
-}
-
-export interface ModelRouteConfig {
-  mode: "priority-latch";
-  groups: RouteGroupConfig[];
-}
-
-export interface RoutingConfig {
-  routes: Record<string, ModelRouteConfig>;
+/** One upstream for a public model: which provider, and the model name sent to it. */
+export interface Deployment {
+  provider: string;
+  model: string;
 }
 
 export interface GatewayConfig {
@@ -55,46 +33,7 @@ export interface GatewayConfig {
     port: number;
     timeoutSeconds: number;
   };
-  strategy: {
-    mode: "latch" | "fallback";
-    debounceSeconds: number;
-    maxRetriesPerRequest: number;
-  };
-  endpoints: EndpointConfig[];
-  routing?: RoutingConfig;
-  models?: {
-    aliases?: Record<string, string>;
-    /** If set, requests whose model is not in this list are rejected (400). */
-    allow?: string[];
-  };
-}
-
-export interface EndpointStats {
-  id: string;
-  name: string;
-  requests: number;
-  successCount: number;
-  errors429: number;
-  last429Time?: string;
-  lastSuccessTime?: string;
-  circuitState?: "closed" | "open" | "half-open";
-  consecutiveFailures?: number;
-  blockedUntil?: string;
-}
-
-export interface GatewayStatus {
-  uptimeSeconds: number;
-  activeIndex: number;
-  activeEndpoint: {
-    id: string;
-    name: string;
-    baseUrl: string;
-  };
-  activePriority?: number;
-  activeGroup?: string;
-  totalRequests: number;
-  totalSwitches: number;
-  lastSwitchTime?: string;
-  lastSwitchReason?: string;
-  endpoints: EndpointStats[];
+  providers: Record<string, ProviderConfig>;
+  /** Public model id -> deployments tried in order. The keys are the only accepted model ids. */
+  models: Record<string, Deployment[]>;
 }

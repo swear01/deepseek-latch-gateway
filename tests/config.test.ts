@@ -1,182 +1,71 @@
 import { describe, expect, it } from "bun:test";
-import { writeFileSync, mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { loadConfig } from "../src/config";
+import { parseConfig } from "../src/config";
+import { pinnedDeploymentProblem } from "../src/latest";
 
-function writeTempConfig(yaml: string): string {
-  const dir = mkdtempSync(join(tmpdir(), "gw-config-"));
-  const path = join(dir, "config.yaml");
-  writeFileSync(path, yaml);
-  return path;
-}
+const example = readFileSync(join(import.meta.dir, "../config.example.yaml"), "utf-8");
 
-describe("Config compat parsing", () => {
-  it("rejects an explicitly configured missing routing file", () => {
-    const previous = process.env.GATEWAY_ROUTING;
-    process.env.GATEWAY_ROUTING = join(mkdtempSync(join(tmpdir(), "gw-missing-routing-")), "absent.yaml");
-    try {
-      expect(() => loadConfig()).toThrow("Routing config not found");
-    } finally {
-      if (previous === undefined) delete process.env.GATEWAY_ROUTING;
-      else process.env.GATEWAY_ROUTING = previous;
-    }
-  });
-
-  it("loads routing with env-only endpoints", () => {
-    const dir = mkdtempSync(join(tmpdir(), "gw-env-routing-"));
-    writeFileSync(join(dir, "routing.yaml"), JSON.stringify({ routes: { flash: {
-      priority_groups: [{ priority: 1, members: [{ endpoint: "opencode-go-1" }] }],
-    } } }));
-    const previous = process.env.OPENCODE_API_KEY_1;
-    process.env.OPENCODE_API_KEY_1 = "test-key";
-    try {
-      expect(loadConfig(join(dir, "missing.yaml")).routing?.routes.flash.groups[0].members[0].endpointId).toBe("opencode-go-1");
-    } finally {
-      if (previous === undefined) delete process.env.OPENCODE_API_KEY_1;
-      else process.env.OPENCODE_API_KEY_1 = previous;
-    }
-  });
-
-  it("parses snake_case compat keys into the camelCase EndpointCompat shape", () => {
-    const path = writeTempConfig(`
-server:
-  host: "127.0.0.1"
-  port: 35001
-strategy:
-  mode: "latch"
-endpoints:
-  - id: "command-code"
-    base_url: "https://api.commandcode.ai/provider/v1"
-    api_key: "sk-test"
-    compat:
-      strip_response_format: true
-      response_reasoning_field: "reasoning"
-      unwrap_error: true
-  - id: "opencode-go-1"
-    base_url: "https://opencode.ai/zen/go/v1"
-    api_key: "sk-test-2"
-    compat:
-      strip_response_format: true
-  - id: "deepseek-official"
-    base_url: "https://api.deepseek.com/v1"
-    api_key: "sk-test-3"
+describe("config", () => {
+  it("parses providers, compat, extra_body and ordered model deployments", () => {
+    process.env.TEST_KEY = "secret";
+    const cfg = parseConfig(`
+server: { port: 35002, timeout_seconds: 30 }
+providers:
+  cc:
+    base_url: "https://cc.test/v1"
+    api_key: "\${TEST_KEY}"
+    compat: { strip_response_format: true, response_reasoning_field: reasoning, unwrap_error: true }
+  or:
+    base_url: "https://or.test/v1"
+    extra_body: { provider: { sort: throughput } }
 models:
-  allow: ["deepseek-v4-flash", "deepseek-v4-pro"]
+  deepseek-flash:
+    - { provider: cc, model: a }
+    - { provider: or, model: b }
 `);
-
-    const config = loadConfig(path);
-    const byId = new Map(config.endpoints.map((ep) => [ep.id, ep]));
-
-    expect(byId.get("command-code")!.compat).toEqual({
-      stripResponseFormat: true,
-      responseReasoningField: "reasoning",
-      unwrapError: true,
+    expect(cfg.server).toEqual({ host: "127.0.0.1", port: 35002, timeoutSeconds: 30 });
+    expect(cfg.providers.cc).toEqual({
+      id: "cc", baseUrl: "https://cc.test/v1", apiKey: "secret",
+      compat: { stripResponseFormat: true, responseReasoningField: "reasoning", unwrapError: true },
     });
-    expect(byId.get("opencode-go-1")!.compat).toEqual({ stripResponseFormat: true });
-    // No compat declared = full official passthrough
-    expect(byId.get("deepseek-official")!.compat).toBeUndefined();
+    expect(cfg.providers.or.extraBody).toEqual({ provider: { sort: "throughput" } });
+    expect(cfg.models["deepseek-flash"]).toEqual([{ provider: "cc", model: "a" }, { provider: "or", model: "b" }]);
   });
 
-  it("accepts camelCase compat keys as well", () => {
-    const path = writeTempConfig(`
-server:
-  host: "127.0.0.1"
-  port: 35001
-strategy:
-  mode: "latch"
-endpoints:
-  - id: "ep"
-    base_url: "https://example.com/v1"
-    api_key: "sk"
-    compat:
-      stripResponseFormat: false
-      responseReasoningField: "thinking"
-      unwrapError: false
-models:
-  allow: ["deepseek-v4-flash"]
-`);
-
-    const config = loadConfig(path);
-    expect(config.endpoints[0].compat).toEqual({
-      stripResponseFormat: false,
-      responseReasoningField: "thinking",
-      unwrapError: false,
-    });
+  it("rejects missing sections, empty lists and unknown providers", () => {
+    const providers = 'providers: { a: { base_url: "https://a.test/v1" } }\n';
+    expect(() => parseConfig("models: { m: [] }")).toThrow("'providers'");
+    expect(() => parseConfig(providers)).toThrow("'models'");
+    expect(() => parseConfig(`${providers}models: { m: [] }`)).toThrow("non-empty");
+    expect(() => parseConfig(`${providers}models: { m: [{ provider: b, model: x }] }`)).toThrow("unknown provider 'b'");
+    expect(() => parseConfig(`${providers}models: { m: [{ provider: a }] }`)).toThrow("'provider' and 'model'");
+    expect(() => parseConfig('providers: { a: { api_key: k } }\nmodels: { m: [{ provider: a, model: x }] }')).toThrow("base_url");
+    const valid = `${providers}models: { m: [{ provider: a, model: x }] }\n`;
+    expect(() => parseConfig(`server: { port: 0 }\n${valid}`)).toThrow("server.port");
+    expect(() => parseConfig(`server: { timeout_seconds: 0 }\n${valid}`)).toThrow("timeout_seconds");
+    expect(() => parseConfig(`server: { timeout_seconds: 256 }\n${valid}`)).toThrow("timeout_seconds");
   });
 
-  it("loads routing from the config directory and keeps provider settings separate", () => {
-    const dir = mkdtempSync(join(tmpdir(), "gw-config-with-routing-"));
-    const configPath = join(dir, "config.yaml");
-    writeFileSync(
-      configPath,
-      `
-server:
-  port: 35001
-strategy:
-  mode: latch
-endpoints:
-  - id: opencode-go-1
-    api_key: key-1
-  - id: opencode-go-2
-    api_key: key-2
-  - id: opencode-go-3
-    api_key: key-3
-  - id: command-code
-    api_key: command-key
-`
-    );
-    writeFileSync(
-      join(dir, "routing.yaml"),
-      `
-routes:
-  deepseek-v4-flash:
-    priority_groups:
-      - id: opencode-go
-        priority: 1
-        mode: latch
-        members:
-          - endpoint: opencode-go-1
-          - endpoint: opencode-go-2
-          - endpoint: opencode-go-3
-      - id: command-code
-        priority: 2
-        mode: latch
-        members:
-          - endpoint: command-code
-            upstream_model: deepseek/deepseek-v4-flash
-`
-    );
-
-    const config = loadConfig(configPath);
-    expect(config.routing?.routes["deepseek-v4-flash"].groups.map((group) => group.priority)).toEqual([1, 2]);
-    expect(config.endpoints.find((endpoint) => endpoint.id === "command-code")?.models).toBeUndefined();
-    expect(config.endpoints.find((endpoint) => endpoint.id === "command-code")?.modelMap).toBeUndefined();
+  it("rejects the old endpoints/routing.yaml format", () => {
+    expect(() => parseConfig('endpoints:\n  - id: a\n    base_url: "https://a.test/v1"\n')).toThrow("'providers'");
   });
 
-  it("loads OpenRouter extra_body provider caps", () => {
-    const path = writeTempConfig(`
-server:
-  port: 35001
-strategy:
-  mode: latch
-endpoints:
-  - id: openrouter
-    base_url: https://openrouter.ai/api/v1
-    api_key: or-key
-    extra_body:
-      provider:
-        sort: throughput
-        max_price:
-          prompt: 0.15
-          completion: 0.60
-`);
-    const config = loadConfig(path);
-    expect(config.endpoints[0].extraBody).toEqual({
-      provider: {
-        sort: "throughput",
-        max_price: { prompt: 0.15, completion: 0.60 },
-      },
-    });
+  it("ships only deepseek-flash and deepseek-pro, each ending on OpenRouter", () => {
+    const cfg = parseConfig(example);
+    expect(Object.keys(cfg.models)).toEqual(["deepseek-flash", "deepseek-pro"]);
+    expect(cfg.models["deepseek-flash"].map((d) => d.provider)).toEqual([
+      "opencode-go-1", "opencode-go-2", "opencode-go-3", "command-code", "openrouter",
+    ]);
+    expect(cfg.models["deepseek-pro"].map((d) => d.provider)).toEqual(["command-code", "openrouter"]);
+  });
+
+  it("ships every deployment pointed at the newest model, never a pinned snapshot", () => {
+    const cfg = parseConfig(example);
+    const deployments = Object.values(cfg.models).flat();
+    expect(deployments.map(pinnedDeploymentProblem).filter(Boolean)).toEqual([]);
+    expect(deployments.filter((d) => d.provider === "openrouter").map((d) => d.model)).toEqual([
+      "~deepseek/deepseek-flash-latest", "~deepseek/deepseek-pro-latest",
+    ]);
   });
 });

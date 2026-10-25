@@ -1,7 +1,7 @@
 {
   "name": "deepseek-latch-gateway",
   "version": "1.0.0",
-  "description": "High-performance DeepSeek AI gateway featuring RS-latch stateful key failover and multi-endpoint routing.",
+  "description": "OpenAI-compatible DeepSeek gateway: ordered per-model provider failover with a 30-minute cooldown.",
   "main": "src/index.ts",
   "type": "module",
   "scripts": {
@@ -9,6 +9,7 @@
     "start": "bun run src/index.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit",
+    "check-latest": "bun run src/check-latest.ts",
     "build": "bun build --compile --minify --outfile=dist/deepseek-gateway src/index.ts",
     "build:linux-x64": "bun build --compile --minify --target=bun-linux-x64 --outfile=dist/deepseek-gateway-linux-x64 src/index.ts",
     "build:linux-arm64": "bun build --compile --minify --target=bun-linux-arm64-v1.3.13 --outfile=dist/deepseek-gateway-linux-arm64 src/index.ts",
@@ -19,8 +20,7 @@
     "ai-gateway",
     "opencode-go",
     "llm-proxy",
-    "failover",
-    "rs-latch"
+    "failover"
   ],
   "author": "swear01",
   "license": "MIT",

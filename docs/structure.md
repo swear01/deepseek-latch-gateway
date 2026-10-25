@@ -13,20 +13,23 @@ deepseek-latch-gateway/
 │   ├── plan.md                 # Current implementation plan
 │   └── roadmap.md              # Future evolution and backlog
 ├── src/                        # Gateway source code
-│   ├── types.ts                # TypeScript interfaces (GatewayConfig, Stats, Status)
-│   ├── config.ts               # Provider/runtime config parser with env expansion
-│   ├── routing.ts              # Independent priority-group routing loader/resolver
-│   ├── latch.ts                # Flat RS-Latch compatibility state machine
-│   ├── priority-latch.ts       # Hierarchical priority group + inner latch state
-│   ├── proxy.ts                # Transparent SSE reverse proxy & retry logic
-│   └── index.ts                # Bun HTTP server & management endpoints (/healthz, /status, /switch)
+│   ├── types.ts                # Config interfaces (providers, deployments)
+│   ├── config.ts               # config.yaml parser with env expansion and validation
+│   ├── router.ts               # Ordered deployments and 30-minute cooldown state
+│   ├── proxy.ts                # Request validation, failover loop, compat bridges, SSE passthrough
+│   ├── latest.ts               # "Newest DeepSeek model" rules and live provider check
+│   ├── redact.ts               # Credential redaction for logged upstream text
+│   ├── check-latest.ts         # `bun run check-latest` entry point
+│   └── index.ts                # Bun HTTP server & management endpoints (/healthz, /status)
 ├── tests/                      # Test suite
-│   ├── latch.test.ts           # Flat state machine unit & concurrency tests
-│   ├── routing.test.ts         # Routing schema and priority state tests
-│   ├── priority-proxy.test.ts  # Hierarchical failover integration tests
-│   └── proxy.test.ts           # Proxy, compatibility, and streaming tests
-├── config.example.yaml         # Provider/runtime configuration template
-├── routing.example.yaml        # Model priority and upstream mapping template
+│   ├── helpers.ts              # Fetch mock and config builders
+│   ├── config.test.ts          # Config parsing and shipped-example rules
+│   ├── proxy.test.ts           # Failover, cooldown, validation and compat
+│   ├── latest.test.ts          # Newest-model rules and check-latest
+│   ├── redact.test.ts          # Credential redaction
+│   ├── session-header.test.ts  # OpenCode session affinity and User-Agent
+│   └── server-timeout.test.ts  # Streaming idle timeout
+├── config.example.yaml         # Provider and model configuration template
 ├── package.json                # Project manifest and scripts
 ├── tsconfig.json               # TypeScript compiler options
 └── .github/
@@ -35,9 +38,8 @@ deepseek-latch-gateway/
 ```
 
 ## Module Boundaries
-- **`latch.ts`**: Flat RS-Latch compatibility state management.
-- **`priority-latch.ts`**: Outer priority traversal and per-group latch state; contains no HTTP transport logic.
-- **`routing.ts`**: Loads and validates model routes independently from provider definitions.
-- **`proxy.ts`**: HTTP forwarding and retry pipeline; applies route-level upstream model mapping.
-- **`config.ts`**: Provider/runtime configuration loading and environment resolution.
+- **`router.ts`**: Which deployments are available and their cooldown/statistics; no HTTP.
+- **`proxy.ts`**: HTTP forwarding, failure classification and compat bridges.
+- **`config.ts`**: Configuration loading, environment resolution and validation.
+- **`latest.ts`**: Model-name parsing and the newest-model checks.
 - **`index.ts`**: Server lifecycle and management endpoints.

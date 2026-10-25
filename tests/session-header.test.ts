@@ -1,102 +1,71 @@
-import { afterEach, expect, it, mock, spyOn } from "bun:test";
-import { RSLatchManager } from "../src/latch";
-import { PriorityLatchManager } from "../src/priority-latch";
-import { handleProxyRequest } from "../src/proxy";
+import { afterEach, expect, it } from "bun:test";
+import { Router } from "../src/router";
 import type { GatewayConfig } from "../src/types";
+import { mockUpstreams, ok, restoreFetch, send, status } from "./helpers";
 
-const captured: Headers[] = [];
-afterEach(() => { mock.restore(); captured.length = 0; });
+afterEach(restoreFetch);
 
-function config(): GatewayConfig {
+function config(baseUrl = "https://opencode.ai/zen/go/v1"): GatewayConfig {
   return {
     server: { host: "127.0.0.1", port: 0, timeoutSeconds: 10 },
-    strategy: { mode: "latch", debounceSeconds: 0, maxRetriesPerRequest: 2 },
-    endpoints: [1, 2].map((n) => ({ id: `go-${n}`, name: `Go ${n}`, apiKey: "test",
-      baseUrl: "https://opencode.ai/zen/go/v1", extraHeaders: { "X-OpenCode-Session": "static-config" } })),
+    providers: Object.fromEntries([1, 2].map((n) => [`go-${n}`, {
+      id: `go-${n}`, apiKey: "test", baseUrl, extraHeaders: { "X-OpenCode-Session": "static-config" },
+    }])),
+    models: { "deepseek-flash": [{ provider: "go-1", model: "m" }, { provider: "go-2", model: "m" }] },
   };
 }
 
-async function send(body: Record<string, unknown>, headers: Record<string, string> = {}, cfg = config(), priority = false) {
-  const req = new Request("http://localhost/v1/chat/completions", {
-    method: "POST", headers, body: JSON.stringify({ model: "deepseek-v4-flash", ...body }),
-  });
-  return handleProxyRequest({ req, url: new URL(req.url), config: cfg,
-    latch: priority ? new PriorityLatchManager(cfg) : new RSLatchManager(cfg) });
+function sendTo(cfg: GatewayConfig, body: Record<string, unknown>, headers: Record<string, string> = {}) {
+  return send(new Router(cfg), cfg, { model: "deepseek-flash", ...body }, headers);
 }
 
-function capture(failFirst = false) {
-  const fakeFetch: typeof fetch = Object.assign(async (_url: RequestInfo | URL, init?: RequestInit) => {
-    captured.push(new Headers(init?.headers));
-    return Response.json({}, { status: failFirst && captured.length === 1 ? 429 : 200 });
-  }, { preconnect: globalThis.fetch.preconnect });
-  spyOn(globalThis, "fetch").mockImplementation(fakeFetch);
+function captureOpenCode(replies = [ok()]) {
+  return mockUpstreams({ opencode: replies });
 }
 
-it("preserves the caller ID over endpoint config and aliases, including quota failover", async () => {
-  capture(true);
-  expect((await send({}, { "x-opencode-session": "conversation-1", "x-session-id": "other" })).status).toBe(200);
-  expect(captured.map((h) => h.get("x-opencode-session"))).toEqual(["conversation-1", "conversation-1"]);
+it("preserves the caller ID over provider config, including quota failover", async () => {
+  const calls = captureOpenCode([status(429), ok()]);
+  expect((await sendTo(config(), {}, { "x-opencode-session": "conversation-1", "x-session-id": "other" })).status).toBe(200);
+  expect(calls.map((c) => c.headers.get("x-opencode-session"))).toEqual(["conversation-1", "conversation-1"]);
 });
 
 it("translates session headers supplied by DSH and Pi", async () => {
-  capture();
-  for (const header of ["x-deepseek-harness-session-id", "x-session-id", "x-session-affinity", "session_id"]) {
-    await send({}, { [header]: "session-2" });
-    expect(captured.at(-1)?.get("x-opencode-session")).toBe("session-2");
+  const calls = captureOpenCode();
+  for (const header of ["x-deepseek-harness-session-id", "x-session-id", "x-session-affinity", "session_id", "x-conversation-id", "conversation_id"]) {
+    await sendTo(config(), {}, { [header]: "session-2" });
+    expect(calls.at(-1)?.headers.get("x-opencode-session")).toBe("session-2");
   }
 });
 
 it("keeps opening-message affinity across turns and isolates different openings and client keys", async () => {
-  capture();
+  const calls = captureOpenCode();
   const opening = { role: "user", content: [{ type: "text", text: "Review this" }] };
-  await send({ messages: [opening] });
-  await send({ messages: [opening, { role: "assistant", content: "OK" }, { role: "user", content: "Continue" }] });
-  await send({ messages: [{ role: "user", content: "A different conversation" }] });
-  await send({ messages: [opening] }, { authorization: "Bearer another-client" });
-  const ids = captured.map((h) => h.get("x-opencode-session"));
+  await sendTo(config(), { messages: [opening] });
+  await sendTo(config(), { messages: [opening, { role: "assistant", content: "OK" }, { role: "user", content: "Continue" }] });
+  await sendTo(config(), { messages: [{ role: "user", content: "A different conversation" }] });
+  await sendTo(config(), { messages: [opening] }, { authorization: "Bearer another-client" });
+  const ids = calls.map((c) => c.headers.get("x-opencode-session"));
   expect(ids[0]).toMatch(/^[a-f0-9]{64}$/);
   expect(ids[0]).toBe(ids[1]);
   expect(new Set(ids).size).toBe(3);
 });
 
-it("applies the same session ID on priority routing failover", async () => {
-  capture(true);
-  const cfg = config();
-  cfg.routing = { routes: { "deepseek-v4-flash": { mode: "priority-latch", groups: [
-    { id: "go", priority: 1, mode: "latch", members: cfg.endpoints.map((ep) => ({ endpointId: ep.id })) },
-  ] } } };
-  expect((await send({ input: "Hello" }, {}, cfg, true)).status).toBe(200);
-  expect(captured).toHaveLength(2);
-  expect(captured[0].get("x-opencode-session")).toBe(captured[1].get("x-opencode-session"));
-});
-
 it("rejects requests with neither identity nor opening and leaves other providers unchanged", async () => {
-  capture();
-  expect((await send({})).status).toBe(400);
-  expect(captured).toHaveLength(0);
-  const cfg = config();
-  cfg.endpoints.forEach((ep) => { ep.baseUrl = "https://api.commandcode.ai/provider/v1"; ep.extraHeaders = {}; });
-  expect((await send({}, {}, cfg)).status).toBe(200);
-  expect(captured[0].has("x-opencode-session")).toBe(false);
+  const calls = mockUpstreams({ opencode: [ok()], api: [ok()] });
+  expect((await sendTo(config(), {})).status).toBe(400);
+  expect(calls).toHaveLength(0);
+  const cfg = config("https://api.commandcode.ai/provider/v1");
+  for (const p of Object.values(cfg.providers)) p.extraHeaders = {};
+  expect((await sendTo(cfg, {})).status).toBe(200);
+  expect(calls[0].headers.has("x-opencode-session")).toBe(false);
 });
 
 it("normalizes generic User-Agent headers like Python-urllib to aisimpv-gateway/1.0", async () => {
-  capture();
-  await send({ input: "Hello" }, { "user-agent": "Python-urllib/3.14" });
-  expect(captured.at(-1)?.get("user-agent")).toBe("aisimpv-gateway/1.0");
-
-  await send({ input: "Hello" }, {});
-  expect(captured.at(-1)?.get("user-agent")).toBe("aisimpv-gateway/1.0");
-
-  await send({ input: "Hello" }, { "user-agent": "custom-agent/2.0" });
-  expect(captured.at(-1)?.get("user-agent")).toBe("custom-agent/2.0");
+  const calls = captureOpenCode();
+  await sendTo(config(), { input: "Hello" }, { "user-agent": "Python-urllib/3.14" });
+  expect(calls.at(-1)?.headers.get("user-agent")).toBe("aisimpv-gateway/1.0");
+  await sendTo(config(), { input: "Hello" });
+  expect(calls.at(-1)?.headers.get("user-agent")).toBe("aisimpv-gateway/1.0");
+  await sendTo(config(), { input: "Hello" }, { "user-agent": "custom-agent/2.0" });
+  expect(calls.at(-1)?.headers.get("user-agent")).toBe("custom-agent/2.0");
 });
-
-it("translates x-conversation-id and conversation_id to x-opencode-session", async () => {
-  capture();
-  for (const header of ["x-conversation-id", "conversation_id"]) {
-    await send({}, { [header]: "conv-99" });
-    expect(captured.at(-1)?.get("x-opencode-session")).toBe("conv-99");
-  }
-});
-

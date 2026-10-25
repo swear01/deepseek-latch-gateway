@@ -1,22 +1,24 @@
 # DeepSeek Latch Gateway — Overview
 
 `deepseek-latch-gateway` is a lightweight OpenAI-compatible gateway for DeepSeek
-models and multiple OpenCode Go accounts.
+models across OpenCode Go accounts, Command Code and OpenRouter.
 
 ## Routing model
 
-Routing is hierarchical rather than a flat endpoint list:
+Configuration follows LiteLLM's shape in a single `config.yaml`:
 
-- Priority 1 is an RS-Latch group containing the OpenCode Go accounts.
-- Priority 2 is the Command Code fallback group.
-- A group is exhausted before the outer route advances to the next priority.
-- Exhausted endpoints are retried through a single half-open probe after their cooldown, restoring the highest available priority on success.
-- Route-specific upstream model names are kept in `routing.yaml`.
-- Provider URLs, credentials, and compatibility behavior remain in `config.yaml`.
+- `providers` holds URLs, credentials and compatibility bridges.
+- `models` maps each public model id (`deepseek-flash`, `deepseek-pro`) to an
+  ordered list of deployments (`provider` + upstream `model`).
+- A request uses the first deployment that is not cooling down. Any provider
+  failure (quota, credentials, block, 408, 5xx, network) pauses that
+  deployment for 30 minutes.
+- Deployments always name the newest DeepSeek model: undated names on
+  OpenCode Go and Command Code, `~deepseek/deepseek-*-latest` on OpenRouter.
+  `bun run check-latest` verifies this against the live providers.
 
-The Flash route therefore tries OpenCode accounts 1, 2, and 3 before using
-Command Code with `deepseek/deepseek-v4.1-flash`. The Pro route references the
-same Command Code provider with `deepseek/deepseek-v4-pro`.
+`deepseek-flash` tries OpenCode accounts 1, 2 and 3, then Command Code, then
+OpenRouter. `deepseek-pro` tries Command Code, then OpenRouter.
 
 ## Target consumers
 
