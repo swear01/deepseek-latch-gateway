@@ -100,9 +100,9 @@ port。舊 `routing.yaml` 改名備份即可，新版不讀。binary 與 config 
 舊 binary 讀不了新格式，新 binary 讀不了舊格式。
 
 2026-10-25（台灣時間）部署 PR #24（merge `3042db6`）簡化 router：binary 與 config 同時更換，
-各機 config 以 `convert.ts` 轉成 `providers` + `models` 格式（保留各機 server、endpoint 欄位與
+各機 config 以本機一次性部署工具 `convert.ts`（不在 repo；逐一照上方遷移規則轉換）轉成 `providers` + `models` 格式（保留各機 server、endpoint 欄位與
 `${VAR}` key 參照），`routing.yaml` 改名為 `routing.yaml.retired-20261025`，回復點為
-`*.bak-20261025-gw2`。
+`*.bak-20261025-gw2`。各機驗證用的 `verify.sh` 也是不在 repo 的本機腳本，內容為下列 HTTP 檢查。
 
 - 完成並驗證 6 個 Gateway：mazu、zeus（swear01，35001）、cthulhu、valkyrie（四台 NFS 共用檔案，
   mazu 替換一次後逐台重啟）、Zeus（swear02，35002）、Oracle（各自從 `3042db6` 建置）。
