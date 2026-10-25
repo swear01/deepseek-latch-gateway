@@ -15,7 +15,7 @@ Routing is hierarchical rather than a flat endpoint list:
 - Provider URLs, credentials, and compatibility behavior remain in `config.yaml`.
 
 The Flash route therefore tries OpenCode accounts 1, 2, and 3 before using
-Command Code with `deepseek/deepseek-v4-flash`. The Pro route references the
+Command Code with `deepseek/deepseek-v4.1-flash`. The Pro route references the
 same Command Code provider with `deepseek/deepseek-v4-pro`.
 
 ## Target consumers

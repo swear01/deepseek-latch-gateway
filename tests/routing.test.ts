@@ -143,8 +143,18 @@ routes:
     ]);
     expect(flash.groups[2].members[0]).toEqual({
       endpointId: "openrouter",
-      upstreamModel: "deepseek/deepseek-v4.1-flash",
+      upstreamModel: "deepseek/deepseek-v4.1-flash-1017",
     });
+  });
+
+  it("ships deepseek-v4.1-flash-1017 pinned to the OpenRouter 1017 snapshot only", () => {
+    const routing = loadRoutingConfig(join(import.meta.dir, "../routing.example.yaml"));
+    const pinned = resolveRoute(routing, "deepseek-v4.1-flash-1017");
+    expect(pinned.groups.map((group) => group.id)).toEqual(["openrouter-1017"]);
+    expect(pinned.groups[0].members).toEqual([
+      { endpointId: "openrouter", upstreamModel: "deepseek/deepseek-v4.1-flash-1017" },
+    ]);
+    expect(routing.routes["deepseek-v4-flash"]).toBeUndefined();
   });
 });
 

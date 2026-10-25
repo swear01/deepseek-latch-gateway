@@ -20,30 +20,17 @@ routes:
         mode: "latch"
         members:
           - endpoint: "openrouter"
-            upstream_model: "deepseek/deepseek-v4.1-flash"
+            upstream_model: "deepseek/deepseek-v4.1-flash-1017"
 
-  deepseek-v4-flash:
+  deepseek-v4.1-flash-1017:
     mode: "priority-latch"
     priority_groups:
-      - id: "opencode-go"
+      - id: "openrouter-1017"
         priority: 1
         mode: "latch"
         members:
-          - endpoint: "opencode-go-1"
-          - endpoint: "opencode-go-2"
-          - endpoint: "opencode-go-3"
-      - id: "command-code-fallback"
-        priority: 2
-        mode: "latch"
-        members:
-          - endpoint: "command-code"
-            upstream_model: "deepseek/deepseek-v4-flash"
-      - id: "openrouter-fallback"
-        priority: 3
-        mode: "latch"
-        members:
           - endpoint: "openrouter"
-            upstream_model: "deepseek/deepseek-v4-flash-0731"
+            upstream_model: "deepseek/deepseek-v4.1-flash-1017"
 
   deepseek-pro:
     mode: "priority-latch"

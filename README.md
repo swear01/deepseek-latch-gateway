@@ -94,14 +94,17 @@ routes:
         mode: "latch"
         members:
           - endpoint: "openrouter"
-            upstream_model: "deepseek/deepseek-v4.1-flash"
+            upstream_model: "deepseek/deepseek-v4.1-flash-1017"
 ```
 
 Priority is only attempt order. A request walks every remaining member before
-returning 429. `deepseek-flash` uses OpenRouter last with
-`deepseek/deepseek-v4.1-flash`; the legacy `deepseek-v4-flash` route keeps
-`deepseek/deepseek-v4-flash-0731`. The shared OpenRouter endpoint caps
-`max_price` at $0.15 / $0.60 so the official V4.1 Flash provider is eligible.
+returning 429. `deepseek-flash` uses OpenRouter last with the dated
+`deepseek/deepseek-v4.1-flash-1017` snapshot; OpenRouter's undated
+`deepseek/deepseek-v4.1-flash` is the 0910 release. `deepseek-v4.1-flash-1017`
+routes only to that OpenRouter snapshot, because Command Code cannot pin a
+snapshot, so a client that needs 1017 never gets another model. The legacy
+`deepseek-v4-flash` alias is not served. The shared OpenRouter endpoint caps
+`max_price` at $0.15 / $0.60, which the 1017 providers meet.
 The same `command-code` provider can be referenced by the Pro route with a
 different `upstream_model`; it is not duplicated in the provider list.
 
@@ -206,7 +209,7 @@ client = OpenAI(
 )
 
 response = client.chat.completions.create(
-    model="deepseek-v4-flash",
+    model="deepseek-flash",
     messages=[{"role": "user", "content": "Hello!"}],
     stream=True
 )
@@ -218,7 +221,7 @@ for chunk in response:
 ```yaml
 llm:
   url: "http://127.0.0.1:35001/v1/chat/completions"
-  model: "deepseek-v4-flash"
+  model: "deepseek-flash"
 ```
 
 ---
